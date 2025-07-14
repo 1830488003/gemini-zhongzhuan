@@ -79,12 +79,6 @@ export default {
       return handleOPTIONS();
     }
 
-    // 验证客户端提供的自定义密钥
-    const authKey = request.headers.get("Authorization")?.split(" ")[1];
-    if (authKey !== CUSTOM_AUTH_KEY) {
-      return new Response("Unauthorized", fixCors({ status: 401 }));
-    }
-
     const errHandler = (err) => {
       console.error(err);
       return new Response(err.message, fixCors({ status: err.status ?? 500 }));
@@ -92,6 +86,21 @@ export default {
 
     try {
       const { pathname } = new URL(request.url);
+
+      // 公开的密钥测试接口，无需认证
+      if (pathname.endsWith("/v1/test-key")) {
+        if (request.method === "POST") {
+          return handleTestKey(await request.json()).catch(errHandler);
+        }
+        throw new HttpError("Method not allowed for /v1/test-key, use POST", 405);
+      }
+
+      // 其他所有接口都需要通过自定义密钥认证
+      const authKey = request.headers.get("Authorization")?.split(" ")[1];
+      if (authKey !== CUSTOM_AUTH_KEY) {
+        return new Response("Unauthorized", fixCors({ status: 401 }));
+      }
+
       const assert = (success) => {
         if (!success) {
           throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
@@ -152,6 +161,35 @@ const makeHeaders = (more) => ({
   "x-goog-api-client": API_CLIENT,
   ...more
 });
+
+/**
+ * 处理密钥测试请求
+ * @param {object} req - 请求体，应包含 { apiKey: "..." }
+ * @returns {Promise<Response>}
+ */
+async function handleTestKey(req) {
+  const { apiKey } = req;
+  if (!apiKey) {
+    throw new HttpError("apiKey not provided in request body", 400);
+  }
+
+  try {
+    const url = `${BASE_URL}/${API_VERSION}/models?key=${apiKey}`;
+    const response = await fetch(url);
+    
+    // 无论成功失败，都返回 200，并将结果放在 body 中，方便客户端处理
+    if (response.ok) {
+      return new Response(JSON.stringify({ success: true }), fixCors({ status: 200, headers: { "Content-Type": "application/json" } }));
+    } else {
+      const errorBody = await response.text();
+      console.log(`Key test failed for ...${apiKey.slice(-4)}: ${errorBody}`);
+      return new Response(JSON.stringify({ success: false, error: `Google API returned status ${response.status}` }), fixCors({ status: 200, headers: { "Content-Type": "application/json" } }));
+    }
+  } catch (error) {
+    console.error(`Network error during key test for ...${apiKey.slice(-4)}:`, error);
+    return new Response(JSON.stringify({ success: false, error: error.message }), fixCors({ status: 200, headers: { "Content-Type": "application/json" } }));
+  }
+}
 
 async function handleModels () {
   const response = await fetchWithRetry(`${BASE_URL}/${API_VERSION}/models`, {
