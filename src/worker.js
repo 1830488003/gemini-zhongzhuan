@@ -34,9 +34,15 @@ class KeyManager {
   }
 
   loadKeys(env) {
-    if (env && env.GEMINI_API_KEYS && this.keys.length === 0) {
-      this.keys = env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean);
-      console.log(`KeyManager: Loaded ${this.keys.length} keys.`);
+    // This is now designed to run on every request for robustness in a serverless environment.
+    // It ensures that if env vars are not available on a cold start, they will be picked up on subsequent requests.
+    if (env && env.GEMINI_API_KEYS) {
+      const newKeys = env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean);
+      // To avoid log spam, only log when the keys are loaded for the first time or have changed.
+      if (this.keys.length !== newKeys.length || this.keys.some((key, i) => key !== newKeys[i])) {
+        this.keys = newKeys;
+        console.log(`KeyManager: Loaded or updated ${this.keys.length} keys.`);
+      }
     }
   }
 
