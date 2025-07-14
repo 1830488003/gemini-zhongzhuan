@@ -87,13 +87,8 @@ async function handleChatCompletionsRequest(request) {
   });
 
   if (requestBody.stream) {
-    // For streaming, we can't easily add headers later, so the main handler will do it.
-    // The TransformStream is passed back up.
     const { readable, writable } = new TransformStream();
     streamGeminiToOpenAI(geminiResponse.body, writable, model);
-    // Note: The main handler will wrap this in a new Response with CORS headers.
-    // This is a conceptual simplification; in reality, the headers are added to the *final* response.
-    // For edge functions, returning a ReadableStream directly is fine, headers are added by the wrapper.
     return new Response(readable, {
       headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
     });
@@ -101,7 +96,7 @@ async function handleChatCompletionsRequest(request) {
     const geminiJson = await geminiResponse.json();
     const openaiJson = convertResponseToOpenAI(geminiJson, model);
     return new Response(JSON.stringify(openaiJson), {
-      status: 200, // Always return 200 OK, as the error is in the JSON body
+      status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
   }
@@ -122,6 +117,20 @@ function convertRequestToGemini(openaiRequest) {
   return geminiRequest;
 }
 
+function mapFinishReason(geminiReason) {
+  switch (geminiReason) {
+    case 'STOP':
+      return 'stop';
+    case 'MAX_TOKENS':
+      return 'length';
+    case 'SAFETY':
+    case 'RECITATION':
+      return 'content_filter';
+    default:
+      return 'stop';
+  }
+}
+
 function convertResponseToOpenAI(geminiResponse, model) {
   const now = Math.floor(Date.now() / 1000);
   if (geminiResponse.error) {
@@ -139,16 +148,21 @@ function convertResponseToOpenAI(geminiResponse, model) {
   }
 
   let messageContent = '';
-  let finishReason = choice.finishReason || 'stop';
+  let finishReason = mapFinishReason(choice.finishReason);
 
   if (choice.content?.parts?.[0]?.text) {
     messageContent = choice.content.parts[0].text;
-  } else if (finishReason === 'SAFETY') {
+  } else if (choice.finishReason === 'SAFETY') {
     messageContent = `[RESPONSE BLOCKED] The response was blocked by Google's safety filters.`;
-  } else if (finishReason === 'RECITATION') {
+    finishReason = 'content_filter';
+  } else if (choice.finishReason === 'RECITATION') {
     messageContent = `[RESPONSE BLOCKED] The response was blocked due to recitation policy.`;
+    finishReason = 'content_filter';
   }
 
+  const promptTokens = geminiResponse.usageMetadata?.promptTokenCount || 0;
+  const completionTokens = geminiResponse.usageMetadata?.candidatesTokenCount || 0;
+  
   return {
     id: `chatcmpl-${now}`,
     object: 'chat.completion',
@@ -156,9 +170,9 @@ function convertResponseToOpenAI(geminiResponse, model) {
     model: model,
     choices: [{ index: 0, message: { role: 'assistant', content: messageContent }, finish_reason: finishReason }],
     usage: {
-      prompt_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
-      completion_tokens: geminiResponse.usageMetadata?.candidatesTokenCount || 0,
-      total_tokens: geminiResponse.usageMetadata?.totalTokenCount || 0,
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens, // Manually calculate for consistency
     },
   };
 }
@@ -219,7 +233,10 @@ function convertStreamChunkToOpenAI(geminiChunk, model) {
   if (geminiChunk.error) {
     return { id: `chatcmpl-${now}`, object: 'chat.completion.chunk', created: now, model: model, choices: [{ index: 0, delta: { content: `Gemini API Error: ${geminiChunk.error.message}` }, finish_reason: 'error' }] };
   }
-  const delta = geminiChunk.candidates?.[0]?.content?.parts?.[0]?.text;
+  const choice = geminiChunk.candidates?.[0];
+  if (!choice) return null;
+
+  const delta = choice.content?.parts?.[0]?.text;
   if (delta === undefined || delta === null) {
     return null;
   }
@@ -228,7 +245,7 @@ function convertStreamChunkToOpenAI(geminiChunk, model) {
     object: 'chat.completion.chunk',
     created: now,
     model: model,
-    choices: [{ index: 0, delta: { content: delta }, finish_reason: geminiChunk.candidates[0].finishReason || null }],
+    choices: [{ index: 0, delta: { content: delta }, finish_reason: mapFinishReason(choice.finishReason) }],
   };
 }
 
