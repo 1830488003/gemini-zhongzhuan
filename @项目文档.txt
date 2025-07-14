@@ -1,0 +1,16 @@
+# 项目改造日志
+
+## 2025-07-15
+
+- **目标**: 将项目改造为支持 OpenAI API 格式。
+- **操作**:
+    1.  创建了 `src/openai_adapter.js` 文件，用于处理 OpenAI 和 Gemini API 之间的格式转换。该文件包含以下核心功能：
+        -   将 OpenAI 的 `/v1/chat/completions` 请求转换为 Gemini 的 `generateContent` 或 `streamGenerateContent` 请求。
+        -   将 OpenAI 的请求体（messages, max_tokens, temperature 等）转换为 Gemini 格式。
+        -   将 Gemini 的响应体转换为 OpenAI 格式。
+        -   支持流式和非流式响应。
+        -   从 `Authorization` 头中提取 API 密钥。
+    2.  修改了 `src/handle_request.js` 文件，增加了路由逻辑：
+        -   当请求路径以 `/v1/` 开头时，将请求交由 `openai_adapter.js` 处理。
+        -   对于其他路径，保留原有的直接代理功能。
+- **结果**: 项目现在可以同时接收 Gemini 原生 API 请求和 OpenAI 格式的 API 请求。
