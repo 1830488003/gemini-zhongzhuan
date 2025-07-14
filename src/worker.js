@@ -191,149 +191,136 @@ async function handleChatCompletions(request) {
     const model = openaiRequest.model || "gemini-1.5-flash";
     const geminiRequest = transformRequestToGemini(openaiRequest);
     const stream = openaiRequest.stream || false;
-    const url = `${BASE_URL}/${API_VERSION}/models/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
     
-    let response;
-    let lastError;
-
-    for (let i = 0; i < 5; i++) {
-        const apiKey = keyManager.getKey();
-        if (!apiKey) throw new HttpError("No available API keys.", 503);
-        const requestUrl = new URL(url);
-        requestUrl.searchParams.set("key", apiKey);
-
-        try {
-            const fetchResponse = await fetch(requestUrl.toString(), {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(geminiRequest)
-            });
-
-            if (fetchResponse.ok) {
-                response = fetchResponse;
-                break; // Success
-            }
-            keyManager.reportFailure(apiKey);
-            lastError = new HttpError(`Google API returned status ${fetchResponse.status}`, fetchResponse.status);
-        } catch (error) {
-            keyManager.reportFailure(apiKey);
-            lastError = error;
-        }
-    }
-
-    if (!response) {
-        throw lastError || new HttpError("All API key attempts failed.", 500);
-    }
-
     const id = `chatcmpl-${generateId()}`;
 
     if (stream) {
-        if (!response.body) {
-            throw new HttpError("Response body is null", 500);
-        }
-
-        const streamState = {
-            buffer: "",
-            firstChunkSent: false,
-        };
-
-        const readable = response.body
-            .pipeThrough(new TextDecoderStream())
-            .pipeThrough(new TransformStream({
-                transform(chunk, controller) {
-                    streamState.buffer += chunk;
-                    const lines = streamState.buffer.split("\n");
-                    streamState.buffer = lines.pop() || "";
-                    for (const line of lines) {
-                        if (line.startsWith("data: ")) {
-                            try {
-                                controller.enqueue(JSON.parse(line.substring(6)));
-                            } catch (e) {
-                                console.error("Could not parse stream line:", line);
-                            }
-                        }
-                    }
-                }
-            }))
-            .pipeThrough(new TransformStream({
-                transform(geminiChunk, controller) {
-                    if (!geminiChunk.candidates) {
-                        console.error("Invalid stream chunk:", geminiChunk);
-                        return;
-                    }
-                    const created = Math.floor(Date.now() / 1000);
-                    const choice = transformCandidatesDelta(geminiChunk.candidates[0]);
-                    
-                    if (!streamState.firstChunkSent) {
-                        controller.enqueue(sseline({
-                            id, created, model, object: "chat.completion.chunk",
-                            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
-                        }));
-                        streamState.firstChunkSent = true;
-                    }
-                    
-                    const content = choice.delta.content;
-                    const finish_reason = choice.finish_reason;
-
-                    if (content) {
-                         controller.enqueue(sseline({
-                            id, created, model, object: "chat.completion.chunk",
-                            choices: [{ index: choice.index, delta: { content }, finish_reason: null }]
-                        }));
-                    }
-
-                    if (finish_reason) {
-                        controller.enqueue(sseline({
-                            id, created, model, object: "chat.completion.chunk",
-                            choices: [{ index: choice.index, delta: {}, finish_reason: finish_reason }]
-                        }));
-                    }
-                },
-                flush(controller) {
-                    controller.enqueue("data: [DONE]\n\n");
-                }
-            }))
-            .pipeThrough(new TextEncoderStream());
-        
-        return new Response(readable, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
-
-    } else {
-        // Implement "fake streaming" for non-stream requests to keep connections alive.
+        // This is the "fake streaming" logic.
+        // We make a non-streaming request to the backend, but stream the response to the client.
         const readableStream = new ReadableStream({
             async start(controller) {
-                const keepAliveInterval = 15000; // 15 seconds
-                let keepAliveTimer = setInterval(() => {
-                    try {
-                        controller.enqueue(" "); // Send a space as a keep-alive signal
-                    } catch (e) {
-                        console.error("Error sending keep-alive signal:", e);
-                        clearInterval(keepAliveTimer);
-                    }
-                }, keepAliveInterval);
+                const created = Math.floor(Date.now() / 1000);
 
-                try {
-                    const geminiJson = await response.json();
-                    const body = processCompletionsResponse(geminiJson, model, id);
-                    controller.enqueue(body); // Send the final JSON response
-                } catch (error) {
-                    console.error("Error processing non-stream response:", error);
-                    const errorResponse = JSON.stringify({
-                        error: { message: "Failed to process backend response.", type: 'server_error' }
-                    });
-                    controller.enqueue(errorResponse);
-                } finally {
-                    clearInterval(keepAliveTimer);
-                    controller.close();
+                // Use the non-streaming URL
+                const nonStreamUrl = `${BASE_URL}/${API_VERSION}/models/${model}:generateContent`;
+                
+                let finalResponse;
+                let lastError;
+
+                // Retry loop to find a working key for the non-streaming call
+                for (let i = 0; i < 5; i++) {
+                    const apiKey = keyManager.getKey();
+                    if (!apiKey) {
+                        lastError = new HttpError("No available API keys.", 503);
+                        break;
+                    }
+                    const requestUrl = new URL(nonStreamUrl);
+                    requestUrl.searchParams.set("key", apiKey);
+
+                    try {
+                        const fetchResponse = await fetch(requestUrl.toString(), {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(geminiRequest)
+                        });
+
+                        if (fetchResponse.ok) {
+                            finalResponse = await fetchResponse.json();
+                            break; // Success
+                        }
+                        keyManager.reportFailure(apiKey);
+                        lastError = new HttpError(`Google API returned status ${fetchResponse.status}`, fetchResponse.status);
+                    } catch (error) {
+                        keyManager.reportFailure(apiKey);
+                        lastError = error;
+                    }
                 }
+
+                if (!finalResponse) {
+                     const errorChunk = {
+                        id, created, model, object: "chat.completion.chunk",
+                        choices: [{ index: 0, delta: { content: `Error: ${lastError?.message || 'All API key attempts failed.'}` }, finish_reason: 'error' }]
+                    };
+                    controller.enqueue(sseline(errorChunk));
+                    controller.enqueue("data: [DONE]\n\n");
+                    controller.close();
+                    return;
+                }
+
+                // Now, we have the full response. We need to chunk it for the client.
+                const fullMessage = finalResponse.candidates?.[0]?.content?.parts?.[0]?.text || "";
+                const finishReason = reasonsMap[finalResponse.candidates?.[0]?.finishReason] || "stop";
+
+                // 1. Send initial role chunk
+                controller.enqueue(sseline({
+                    id, created, model, object: "chat.completion.chunk",
+                    choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+                }));
+
+                // 2. Send content chunks
+                const chunkSize = 5; // Send 5 characters at a time
+                for (let i = 0; i < fullMessage.length; i += chunkSize) {
+                    const contentChunk = fullMessage.substring(i, i + chunkSize);
+                    controller.enqueue(sseline({
+                        id, created, model, object: "chat.completion.chunk",
+                        choices: [{ index: 0, delta: { content: contentChunk }, finish_reason: null }]
+                    }));
+                    await new Promise(resolve => setTimeout(resolve, 5)); 
+                }
+
+                // 3. Send final chunk with finish reason
+                controller.enqueue(sseline({
+                    id, created, model, object: "chat.completion.chunk",
+                    choices: [{ index: 0, delta: {}, finish_reason: finishReason }]
+                }));
+
+                // 4. Send DONE signal
+                controller.enqueue("data: [DONE]\n\n");
+                controller.close();
             }
         });
 
-        return new Response(readableStream, { headers: { "Content-Type": "application/json", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
+        return new Response(readableStream, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
+
+    } else {
+        // This is the standard non-streaming logic.
+        let response;
+        let lastError;
+
+        for (let i = 0; i < 5; i++) {
+            const apiKey = keyManager.getKey();
+            if (!apiKey) throw new HttpError("No available API keys.", 503);
+            const requestUrl = new URL(`${BASE_URL}/${API_VERSION}/models/${model}:generateContent`);
+            requestUrl.searchParams.set("key", apiKey);
+
+            try {
+                const fetchResponse = await fetch(requestUrl.toString(), {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(geminiRequest)
+                });
+
+                if (fetchResponse.ok) {
+                    response = fetchResponse;
+                    break; // Success
+                }
+                keyManager.reportFailure(apiKey);
+                lastError = new HttpError(`Google API returned status ${fetchResponse.status}`, fetchResponse.status);
+            } catch (error) {
+                keyManager.reportFailure(apiKey);
+                lastError = error;
+            }
+        }
+
+        if (!response) {
+            throw lastError || new HttpError("All API key attempts failed.", 500);
+        }
+        
+        const geminiJson = await response.json();
+        const body = processCompletionsResponse(geminiJson, model, id);
+        return new Response(body, { headers: { "Content-Type": "application/json" } });
     }
 }
-
-
-// --- Request Handling ---
 
 /**
  * Handles requests for the model list.
