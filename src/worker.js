@@ -47,8 +47,18 @@ class KeyManager {
     ];
     /** @type {Map<string, number>} */
     this.failedKeys = new Map(); // Store key and timestamp of failure
+    /** @type {Map<string, number>} */
+    this.usageStats = new Map(); // Store key and its usage count
     this.FAILURE_COOLDOWN = 10 * 60 * 1000; // 10 minutes
     console.log(`KeyManager: Initialized with ${this.keys.length} built-in keys.`);
+    this.keys.forEach(key => this.usageStats.set(key, 0));
+  }
+
+  _incrementUsage(key) {
+    if (key) {
+      const currentCount = this.usageStats.get(key) || 0;
+      this.usageStats.set(key, currentCount + 1);
+    }
   }
 
   getKey() {
@@ -58,7 +68,9 @@ class KeyManager {
       return !failureTime || (now - failureTime > this.FAILURE_COOLDOWN);
     });
     if (availableKeys.length === 0) return null;
-    return availableKeys[Math.floor(Math.random() * availableKeys.length)];
+    const key = availableKeys[Math.floor(Math.random() * availableKeys.length)];
+    this._incrementUsage(key);
+    return key;
   }
 
   reportFailure(key) {
@@ -194,11 +206,17 @@ async function handleChatCompletions(request) {
     const url = `${BASE_URL}/${API_VERSION}/models/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
     
     let response;
-    let lastError;
+    const retryAttempts = 5;
+    const attemptLogs = [];
 
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < retryAttempts; i++) {
         const apiKey = keyManager.getKey();
-        if (!apiKey) throw new HttpError("No available API keys.", 503);
+        if (!apiKey) {
+            attemptLogs.push(`Attempt ${i + 1}: No available API keys.`);
+            break; 
+        }
+        
+        const keyIdentifier = `...${apiKey.slice(-4)}`;
         const requestUrl = new URL(url);
         requestUrl.searchParams.set("key", apiKey);
 
@@ -211,18 +229,26 @@ async function handleChatCompletions(request) {
 
             if (fetchResponse.ok) {
                 response = fetchResponse;
+                // Optional: Log success for debugging
+                // console.log(`Attempt ${i + 1} with key ${keyIdentifier} succeeded.`);
                 break; // Success
             }
+            
+            const errorBody = await fetchResponse.text();
+            const errorMessage = `Google API returned status ${fetchResponse.status} with key ${keyIdentifier}. Body: ${errorBody}`;
+            attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
             keyManager.reportFailure(apiKey);
-            lastError = new HttpError(`Google API returned status ${fetchResponse.status}`, fetchResponse.status);
+
         } catch (error) {
+            const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
+            attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
             keyManager.reportFailure(apiKey);
-            lastError = error;
         }
     }
 
     if (!response) {
-        throw lastError || new HttpError("All API key attempts failed.", 500);
+        const detailedError = `All ${retryAttempts} API key attempts failed. Logs:\n${attemptLogs.join("\n")}`;
+        throw new HttpError(detailedError, 500);
     }
 
     const id = `chatcmpl-${generateId()}`;
@@ -345,11 +371,27 @@ async function handleModels() {
  * @returns {Response}
  */
 function handleDiagStatus() {
-    const status = {
-        keys_loaded: keyManager.keys.length,
-        keys_in_cooldown: keyManager.failedKeys.size,
+    const now = Date.now();
+    const keyDetails = keyManager.keys.map(key => {
+        const failureTime = keyManager.failedKeys.get(key);
+        const cooldownRemaining = failureTime ? Math.max(0, failureTime + keyManager.FAILURE_COOLDOWN - now) : 0;
+        const status = cooldownRemaining > 0 ? 'cooldown' : 'available';
+        
+        return {
+            id: `...${key.slice(-4)}`,
+            status: status,
+            usageCount: keyManager.usageStats.get(key) || 0,
+            cooldownUntil: (status === 'cooldown' && failureTime) ? new Date(failureTime + keyManager.FAILURE_COOLDOWN).toISOString() : null,
+        };
+    });
+
+    const summary = {
+        totalKeys: keyManager.keys.length,
+        availableKeys: keyDetails.filter(k => k.status === 'available').length,
+        cooldownKeys: keyDetails.filter(k => k.status === 'cooldown').length,
     };
-    return new Response(JSON.stringify(status), { headers: { "Content-Type": "application/json" } });
+
+    return new Response(JSON.stringify({ summary, details: keyDetails }), { headers: { "Content-Type": "application/json" } });
 }
 
 
