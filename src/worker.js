@@ -84,6 +84,27 @@ class KeyManager {
 // --- Global Instances ---
 const keyManager = new KeyManager();
 
+class GlobalLogger {
+    constructor(maxSize = 100) {
+        this.logs = [];
+        this.maxSize = maxSize;
+    }
+
+    log(message, type = 'INFO') {
+        const timestamp = new Date().toISOString();
+        const logEntry = { timestamp, type, message };
+        this.logs.unshift(logEntry); // Add to the beginning
+        if (this.logs.length > this.maxSize) {
+            this.logs.pop(); // Remove the oldest
+        }
+    }
+
+    getLogs() {
+        return this.logs;
+    }
+}
+const logger = new GlobalLogger();
+
 // --- Data Transformation ---
 
 function convertMessagesToGemini(messages) {
@@ -217,6 +238,7 @@ async function handleChatCompletions(request) {
         }
         
         const keyIdentifier = `...${apiKey.slice(-4)}`;
+        logger.log(`Attempt ${i + 1}: Using key ${keyIdentifier} for model ${model}.`);
         const requestUrl = new URL(url);
         requestUrl.searchParams.set("key", apiKey);
 
@@ -229,25 +251,27 @@ async function handleChatCompletions(request) {
 
             if (fetchResponse.ok) {
                 response = fetchResponse;
-                // Optional: Log success for debugging
-                // console.log(`Attempt ${i + 1} with key ${keyIdentifier} succeeded.`);
+                logger.log(`Attempt ${i + 1}: Request with key ${keyIdentifier} succeeded.`);
                 break; // Success
             }
             
             const errorBody = await fetchResponse.text();
             const errorMessage = `Google API returned status ${fetchResponse.status} with key ${keyIdentifier}. Body: ${errorBody}`;
             attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
+            logger.log(`Attempt ${i + 1} FAILED: ${errorMessage}`, 'ERROR');
             keyManager.reportFailure(apiKey);
 
         } catch (error) {
             const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
             attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
+            logger.log(`Attempt ${i + 1} FAILED: ${errorMessage}`, 'ERROR');
             keyManager.reportFailure(apiKey);
         }
     }
 
     if (!response) {
         const detailedError = `All ${retryAttempts} API key attempts failed. Logs:\n${attemptLogs.join("\n")}`;
+        logger.log(detailedError, 'CRITICAL');
         throw new HttpError(detailedError, 500);
     }
 
@@ -370,6 +394,10 @@ async function handleModels() {
  * Handles requests for the diagnostic status.
  * @returns {Response}
  */
+function handleDiagLogs() {
+    return new Response(JSON.stringify(logger.getLogs()), { headers: { "Content-Type": "application/json" } });
+}
+
 function handleDiagStatus() {
     const now = Date.now();
     const keyDetails = keyManager.keys.map(key => {
@@ -425,6 +453,11 @@ async function handleRequest(request, env) {
 
     if (pathname.endsWith("/v1/diag/status")) {
         const response = handleDiagStatus();
+        return addCors(response);
+    }
+
+    if (pathname.endsWith("/v1/diag/logs")) {
+        const response = handleDiagLogs();
         return addCors(response);
     }
 
