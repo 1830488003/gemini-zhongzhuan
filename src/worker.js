@@ -283,6 +283,54 @@ async function handleChatCompletions(request) {
 }
 
 
+// --- Request Handling ---
+
+/**
+ * Handles requests for the model list.
+ * @returns {Promise<Response>}
+ */
+async function handleModels() {
+    const apiKey = keyManager.getKey();
+    if (!apiKey) {
+        throw new HttpError("No available API keys to fetch models.", 503);
+    }
+    const url = `${BASE_URL}/${API_VERSION}/models?key=${apiKey}`;
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new HttpError(`Failed to fetch models from Google: ${response.status}`, response.status);
+        }
+        const googleJson = await response.json();
+        const openAIResponse = {
+            object: "list",
+            data: googleJson.models.map(model => ({
+                id: model.name.replace("models/", ""),
+                object: "model",
+                created: new Date(model.createTime).getTime() / 1000,
+                owned_by: "google",
+            })),
+        };
+        return new Response(JSON.stringify(openAIResponse), { headers: { "Content-Type": "application/json" } });
+    } catch (error) {
+        console.error("Error in handleModels:", error);
+        keyManager.reportFailure(apiKey);
+        throw error;
+    }
+}
+
+/**
+ * Handles requests for the diagnostic status.
+ * @returns {Response}
+ */
+function handleDiagStatus() {
+    const status = {
+        keys_loaded: keyManager.keys.length,
+        keys_in_cooldown: keyManager.failedKeys.size,
+    };
+    return new Response(JSON.stringify(status), { headers: { "Content-Type": "application/json" } });
+}
+
+
 // --- Main Entry Point ---
 
 async function handleRequest(request, env) {
@@ -305,6 +353,16 @@ async function handleRequest(request, env) {
     if (pathname.endsWith("/chat/completions")) {
       const response = await handleChatCompletions(request);
       return addCors(response);
+    }
+    
+    if (pathname.endsWith("/v1/models")) {
+        const response = await handleModels();
+        return addCors(response);
+    }
+
+    if (pathname.endsWith("/v1/diag/status")) {
+        const response = handleDiagStatus();
+        return addCors(response);
     }
 
     return addCors(new Response("Not Found", { status: 404 }));

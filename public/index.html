@@ -3,184 +3,192 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Gemini-OpenAI 代理测试工具</title>
+    <title>服务健康与测试仪表盘</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background-color: #f4f7f9; color: #333; margin: 0; padding: 20px; display: flex; justify-content: center; }
-        .container { width: 100%; max-width: 800px; background: #fff; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.1); padding: 20px; }
-        h1, h2 { color: #1a73e8; border-bottom: 2px solid #e8f0fe; padding-bottom: 10px; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; font-weight: 600; margin-bottom: 5px; }
-        input[type="text"], input[type="password"], select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 4px; box-sizing: border-box; }
-        button { background-color: #1a73e8; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; transition: background-color 0.3s; }
-        button:hover { background-color: #155ab6; }
-        button:disabled { background-color: #a0c3ff; cursor: not-allowed; }
-        #chat-box { height: 300px; border: 1px solid #ddd; border-radius: 4px; padding: 10px; overflow-y: auto; margin-bottom: 15px; background: #fafafa; }
-        .message { margin-bottom: 10px; padding: 8px 12px; border-radius: 8px; max-width: 80%; }
-        .user-message { background-color: #e8f0fe; align-self: flex-end; margin-left: auto; }
-        .bot-message { background-color: #e1f5fe; align-self: flex-start; }
-        .error-message { background-color: #fde2e2; color: #c53030; }
-        #response-area { margin-top: 20px; }
-        pre { background-color: #2d2d2d; color: #f1f1f1; padding: 15px; border-radius: 4px; white-space: pre-wrap; word-wrap: break-word; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; color: #333; max-width: 900px; margin: 20px auto; padding: 0 20px; background-color: #f8f9fa; }
+        h1, h2 { color: #007bff; border-bottom: 2px solid #007bff; padding-bottom: 10px; }
+        .container { background-color: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        .input-group { margin-bottom: 15px; }
+        .input-group label { display: block; margin-bottom: 5px; font-weight: bold; }
+        .input-group input, .input-group textarea { width: 100%; padding: 10px; border-radius: 5px; border: 1px solid #ccc; box-sizing: border-box; }
+        button { background-color: #28a745; color: white; padding: 10px 20px; border: none; border-radius: 5px; font-size: 16px; cursor: pointer; transition: background-color 0.3s; }
+        button:hover { background-color: #218838; }
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+        #log-container { background-color: #222; color: #eee; padding: 15px; border-radius: 5px; height: 300px; overflow-y: scroll; font-family: 'Courier New', Courier, monospace; font-size: 14px; }
+        .log-entry { padding: 2px 0; border-bottom: 1px solid #444; }
+        .log-entry.error { color: #ff8a8a; }
+        .log-entry.success { color: #8aff8a; }
+        .log-entry.info { color: #8acfff; }
+        .status-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
+        .status-item { background: #e9ecef; padding: 15px; border-radius: 5px; }
+        .status-item h3 { margin-top: 0; }
     </style>
 </head>
 <body>
+
+    <h1>服务健康与测试仪表盘</h1>
+
     <div class="container">
-        <h1>Gemini-OpenAI 代理测试工具</h1>
-        
-        <div class="form-group">
-            <label for="apiUrl">API 地址</label>
-            <input type="text" id="apiUrl" value="https://adorable-lily-951a2e.netlify.app" placeholder="例如: https://your-worker.workers.dev">
+        <h2>1. 配置</h2>
+        <div class="input-group">
+            <label for="api-host">API 地址 (Host)</label>
+            <input type="text" id="api-host" value="https://adorable-lily-951a2e.netlify.app">
         </div>
-        
-        <div class="form-group">
-            <label for="apiKey">Gemini API 密钥</label>
-            <input type="password" id="apiKey" placeholder="请输入您的 Gemini API Key">
-        </div>
-
-        <div class="form-group">
-            <button id="loadModelsBtn">加载模型</button>
-        </div>
-
-        <div class="form-group">
-            <label for="modelSelect">选择模型</label>
-            <select id="modelSelect" disabled></select>
-        </div>
-
-        <hr>
-
-        <h2>对话测试</h2>
-        <div id="chat-box"></div>
-        <div class="form-group" style="display: flex;">
-            <input type="text" id="messageInput" placeholder="输入消息..." style="flex-grow: 1; margin-right: 10px;">
-            <button id="sendBtn" disabled>发送</button>
-        </div>
-
-        <div id="response-area">
-            <h2>原始响应 (Raw Response)</h2>
-            <pre id="rawResponse">等待发送消息...</pre>
+        <div class="input-group">
+            <label for="api-key">自定义访问密钥</label>
+            <input type="password" id="api-key" value="67564534">
         </div>
     </div>
 
+    <div class="container">
+        <h2>2. 服务状态诊断</h2>
+        <button id="run-diag-btn">检查服务状态</button>
+        <div class="status-grid" id="diag-results" style="margin-top: 15px;"></div>
+    </div>
+
+    <div class="container">
+        <h2>3. 模型列表</h2>
+        <button id="load-models-btn">加载模型列表</button>
+        <div class="input-group" style="margin-top: 15px;">
+            <label for="models-select">可用模型</label>
+            <select id="models-select" style="width: 100%; padding: 10px;"></select>
+        </div>
+    </div>
+
+    <div class="container">
+        <h2>4. 聊天测试</h2>
+        <div class="input-group">
+            <label for="chat-input">输入消息</label>
+            <textarea id="chat-input" rows="3">你好，请介绍一下你自己。</textarea>
+        </div>
+        <button id="send-chat-btn">发送</button>
+    </div>
+    
+    <div class="container">
+        <h2>5. 实时日志与结果</h2>
+        <div id="log-container"></div>
+    </div>
+
     <script>
-        const apiUrlInput = document.getElementById('apiUrl');
-        const apiKeyInput = document.getElementById('apiKey');
-        const loadModelsBtn = document.getElementById('loadModelsBtn');
-        const modelSelect = document.getElementById('modelSelect');
-        const chatBox = document.getElementById('chat-box');
-        const messageInput = document.getElementById('messageInput');
-        const sendBtn = document.getElementById('sendBtn');
-        const rawResponse = document.getElementById('rawResponse');
+        const getEl = (id) => document.getElementById(id);
 
-        let history = [];
+        const apiHostInput = getEl('api-host');
+        const apiKeyInput = getEl('api-key');
+        const runDiagBtn = getEl('run-diag-btn');
+        const diagResults = getEl('diag-results');
+        const loadModelsBtn = getEl('load-models-btn');
+        const modelsSelect = getEl('models-select');
+        const chatInput = getEl('chat-input');
+        const sendChatBtn = getEl('send-chat-btn');
+        const logContainer = getEl('log-container');
 
-        loadModelsBtn.addEventListener('click', async () => {
-            const apiUrl = apiUrlInput.value.trim();
-            const apiKey = apiKeyInput.value.trim();
+        function log(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] [${type.toUpperCase()}] ${message}`;
+            logContainer.prepend(entry);
+        }
 
-            if (!apiUrl || !apiKey) {
-                alert('请输入 API 地址和密钥');
-                return;
+        async function fetchAPI(endpoint, options = {}) {
+            const host = apiHostInput.value.trim();
+            const key = apiKeyInput.value.trim();
+            if (!host || !key) {
+                log('API 地址和密钥不能为空', 'error');
+                return null;
             }
 
-            addMessageToBox('正在加载模型...', 'bot-message');
-            loadModelsBtn.disabled = true;
-            loadModelsBtn.textContent = '加载中...';
+            const url = `${host}${endpoint}`;
+            const headers = {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${key}`,
+                ...options.headers,
+            };
+
+            log(`请求 -> ${url}`, 'info');
+            if (options.body) {
+                log(`请求体: ${options.body}`, 'info');
+            }
 
             try {
-                const response = await fetch(`${apiUrl}/v1/models`, {
-                    headers: { 'Authorization': `Bearer ${apiKey}` }
-                });
-
-                const data = await response.json();
-                rawResponse.textContent = JSON.stringify(data, null, 2);
-
-                if (!response.ok || !data.data) {
-                    throw new Error(data.error?.message || '加载模型失败');
+                const response = await fetch(url, { ...options, headers });
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    log(`请求失败: ${response.status} ${response.statusText} - ${errorText}`, 'error');
+                    return null;
                 }
+                const data = await response.json();
+                log(`响应 <- ${JSON.stringify(data)}`, 'success');
+                return data;
+            } catch (error) {
+                log(`网络错误: ${error.message}`, 'error');
+                return null;
+            }
+        }
 
-                modelSelect.innerHTML = '';
+        runDiagBtn.addEventListener('click', async () => {
+            diagResults.innerHTML = '';
+            log('开始服务状态诊断...');
+            const data = await fetchAPI('/v1/diag/status');
+            if (data) {
+                diagResults.innerHTML = `
+                    <div class="status-item">
+                        <h3>环境变量</h3>
+                        <p>${data.keys_loaded > 0 ? '✅ 成功加载' : '❌ 未加载'}</p>
+                    </div>
+                    <div class="status-item">
+                        <h3>Google API 密钥数量</h3>
+                        <p>${data.keys_loaded} 个</p>
+                    </div>
+                    <div class="status-item">
+                        <h3>冷却中的密钥</h3>
+                        <p>${data.keys_in_cooldown} 个</p>
+                    </div>
+                `;
+            }
+        });
+
+        loadModelsBtn.addEventListener('click', async () => {
+            modelsSelect.innerHTML = '';
+            log('开始加载模型列表...');
+            const data = await fetchAPI('/v1/models');
+            if (data && data.data) {
                 data.data.forEach(model => {
                     const option = document.createElement('option');
                     option.value = model.id;
                     option.textContent = model.id;
-                    modelSelect.appendChild(option);
+                    modelsSelect.appendChild(option);
                 });
-                modelSelect.disabled = false;
-                sendBtn.disabled = false;
-                addMessageToBox('模型加载成功！请选择模型并开始对话。', 'bot-message');
-
-            } catch (error) {
-                addMessageToBox(`错误: ${error.message}`, 'error-message');
-                rawResponse.textContent = `错误: ${error.message}`;
-            } finally {
-                loadModelsBtn.disabled = false;
-                loadModelsBtn.textContent = '加载模型';
+                log(`成功加载 ${data.data.length} 个模型。`, 'success');
             }
         });
 
-        sendBtn.addEventListener('click', sendMessage);
-        messageInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') {
-                sendMessage();
+        sendChatBtn.addEventListener('click', async () => {
+            const message = chatInput.value.trim();
+            const selectedModel = modelsSelect.value;
+            if (!message) {
+                log('聊天内容不能为空', 'error');
+                return;
             }
+            if (!selectedModel) {
+                log('请先加载并选择一个模型', 'error');
+                return;
+            }
+
+            log('开始发送聊天请求...');
+            const body = {
+                model: selectedModel,
+                messages: [{ role: 'user', content: message }],
+                stream: false, // 为简化，本工具仅支持非流式
+            };
+            await fetchAPI('/v1/chat/completions', {
+                method: 'POST',
+                body: JSON.stringify(body),
+            });
         });
 
-        async function sendMessage() {
-            const message = messageInput.value.trim();
-            if (!message) return;
+        // Auto-run diagnostics on page load
+        runDiagBtn.click();
 
-            const apiUrl = apiUrlInput.value.trim();
-            const apiKey = apiKeyInput.value.trim();
-            const selectedModel = modelSelect.value;
-
-            addMessageToBox(message, 'user-message');
-            messageInput.value = '';
-            sendBtn.disabled = true;
-            
-            history.push({ role: 'user', content: message });
-
-            try {
-                const response = await fetch(`${apiUrl}/v1/chat/completions`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'Authorization': `Bearer ${apiKey}`
-                    },
-                    body: JSON.stringify({
-                        model: selectedModel,
-                        messages: history
-                    })
-                });
-
-                const data = await response.json();
-                rawResponse.textContent = JSON.stringify(data, null, 2);
-
-                if (!response.ok || data.error || !data.choices || data.choices.length === 0) {
-                     const errorMessage = data.error?.message || data.choices?.[0]?.message?.content || 'API 返回未知错误';
-                     throw new Error(errorMessage);
-                }
-                
-                const botMessage = data.choices[0].message.content;
-                addMessageToBox(botMessage, 'bot-message');
-                history.push({ role: 'assistant', content: botMessage });
-
-            } catch (error) {
-                addMessageToBox(`错误: ${error.message}`, 'error-message');
-                rawResponse.textContent = `错误: ${error.message}`;
-                // Remove last user message from history on error to allow retry
-                history.pop();
-            } finally {
-                sendBtn.disabled = false;
-            }
-        }
-
-        function addMessageToBox(text, className) {
-            const messageElement = document.createElement('div');
-            messageElement.classList.add('message', className);
-            messageElement.textContent = text;
-            chatBox.appendChild(messageElement);
-            chatBox.scrollTop = chatBox.scrollHeight;
-        }
     </script>
 </body>
 </html>
