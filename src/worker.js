@@ -97,7 +97,7 @@ export default {
 
       // 其他所有接口都需要通过自定义密钥认证
       const authHeader = request.headers.get("Authorization");
-      let clientKey = authHeader;
+      let clientKey = authHeader || "";
 
       // 兼容处理 "Bearer <key>" 和 "<key>" 两种格式
       if (authHeader?.startsWith("Bearer ")) {
