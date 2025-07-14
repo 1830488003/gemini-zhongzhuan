@@ -11,7 +11,7 @@ async function handleOpenAIRequest(request) {
   }
 
   if (pathname === '/v1/models') {
-    return handleModelsRequest();
+    return handleModelsRequest(request); // Pass request to get auth header
   }
 
   if (pathname === '/v1/chat/completions') {
@@ -21,23 +21,50 @@ async function handleOpenAIRequest(request) {
   return new Response(JSON.stringify({ error: { message: "Not Found", type: "invalid_request_error" } }), { status: 404, headers: { 'Content-Type': 'application/json' } });
 }
 
-function handleModelsRequest() {
-  // A list of commonly used models.
-  const models = [
-    { id: 'gemini-pro', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
-    { id: 'gemini-1.5-pro-latest', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
-    { id: 'gemini-pro-vision', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
-    { id: 'gemini-1.0-pro', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
-    { id: 'gemini-1.0-pro-vision-latest', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
-  ];
+async function handleModelsRequest(request) {
+  // Fetch models dynamically from Google
+  const apiKey = request.headers.get('authorization')?.split(' ')?.[1];
+  if (!apiKey) {
+    return new Response(JSON.stringify({ error: "Authorization header is missing" }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+  }
 
-  return new Response(JSON.stringify({
-    object: 'list',
-    data: models,
-  }), {
-    status: 200,
-    headers: { 'Content-Type': 'application/json' },
+  const geminiUrl = `https://${GEMINI_API_HOST}/v1beta/models`;
+  const geminiHeaders = new Headers({
+    'Content-Type': 'application/json',
+    'x-goog-api-key': apiKey,
   });
+
+  try {
+    const geminiResponse = await fetch(geminiUrl, { headers: geminiHeaders });
+    if (!geminiResponse.ok) {
+      const errorBody = await geminiResponse.text();
+      console.error("Failed to fetch models from Google:", errorBody);
+      return new Response(errorBody, { status: geminiResponse.status, headers: { 'Content-Type': 'application/json' } });
+    }
+
+    const geminiJson = await geminiResponse.json();
+    const openaiModels = geminiJson.models
+      // Filter for models that support 'generateContent' as a proxy for chat models
+      .filter(model => model.supportedGenerationMethods.includes('generateContent'))
+      .map(model => ({
+        id: model.name.replace("models/", ""), // "models/gemini-pro" -> "gemini-pro"
+        object: 'model',
+        created: Math.floor(Date.now() / 1000), // No creation date from Gemini, so we use now
+        owned_by: 'google',
+      }));
+
+    return new Response(JSON.stringify({
+      object: 'list',
+      data: openaiModels,
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+
+  } catch (e) {
+    console.error("Error fetching/processing models:", e);
+    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
 }
 
 async function handleChatCompletionsRequest(request) {
