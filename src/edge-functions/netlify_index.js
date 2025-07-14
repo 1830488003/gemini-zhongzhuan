@@ -1,12 +1,11 @@
-  import { handleRequest } from "../handle_request.js";
+import { handleRequest } from "../handle_request.js";
 
-  export default async(req, context) => {
-    const url = new URL(req.url);
-    console.log('Request URL:', req.url);
-    
-    return handleRequest(req);
-  }
+// All CORS logic is now handled by netlify.toml,
+// so this file can be very simple.
+export default async (req, context) => {
+  return handleRequest(req);
+};
 
-  export const config = {
-    path: "/*"
-  };
+export const config = {
+  path: "/*"
+};

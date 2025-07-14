@@ -9,16 +9,18 @@ export async function handleRequest(request) {
     return handleOpenAIRequest(request);
   }
 
-  // Handle original proxy functionality
-  const search = url.search;
-
+  // This path is now handled by the publish directory in netlify.toml,
+  // but we keep the logic for other potential environments.
   if (pathname === '/' || pathname === '/index.html') {
-    return new Response('Proxy is Running! Now with OpenAI compatibility. More Details: https://github.com/tech-shrimp/gemini-balance-lite', {
+    return new Response('Proxy is Running! Now with OpenAI compatibility.', {
       status: 200,
       headers: { 'Content-Type': 'text/html' }
     });
   }
 
+  // The original proxy logic for direct Gemini requests.
+  // This part of the code is less likely to be used now but is kept for completeness.
+  const search = url.search;
   const targetUrl = `https://generativelanguage.googleapis.com${pathname}${search}`;
 
   try {
@@ -28,32 +30,21 @@ export async function handleRequest(request) {
         const apiKeys = value.split(',').map(k => k.trim()).filter(k => k);
         if (apiKeys.length > 0) {
           const selectedKey = apiKeys[Math.floor(Math.random() * apiKeys.length)];
-          console.log(`Gemini Selected API Key: ${selectedKey}`);
           headers.set('x-goog-api-key', selectedKey);
         }
-      } else {
-        if (key.trim().toLowerCase() === 'content-type') {
-          headers.set(key, value);
-        }
+      } else if (key.trim().toLowerCase() === 'content-type') {
+        headers.set(key, value);
       }
     }
 
-    const response = await fetch(targetUrl, {
+    return await fetch(targetUrl, {
       method: request.method,
       headers: headers,
       body: request.body
     });
 
-    const responseHeaders = new Headers(response.headers);
-    responseHeaders.set('Referrer-Policy', 'no-referrer');
-
-    return new Response(response.body, {
-      status: response.status,
-      headers: responseHeaders
-    });
-
   } catch (error) {
-    console.error('Failed to fetch:', error);
+    console.error('Failed to fetch in original proxy:', error);
     return new Response('Internal Server Error', { status: 500 });
   }
 }

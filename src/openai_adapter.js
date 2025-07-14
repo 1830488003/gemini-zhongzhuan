@@ -6,10 +6,6 @@ async function handleOpenAIRequest(request) {
   const url = new URL(request.url);
   const pathname = url.pathname;
 
-  if (request.method === 'OPTIONS') {
-    return handleOPTIONS();
-  }
-
   try {
     if (pathname === '/v1/models') {
       return await handleModelsRequest(request);
@@ -91,8 +87,13 @@ async function handleChatCompletionsRequest(request) {
   });
 
   if (requestBody.stream) {
+    // For streaming, we can't easily add headers later, so the main handler will do it.
+    // The TransformStream is passed back up.
     const { readable, writable } = new TransformStream();
     streamGeminiToOpenAI(geminiResponse.body, writable, model);
+    // Note: The main handler will wrap this in a new Response with CORS headers.
+    // This is a conceptual simplification; in reality, the headers are added to the *final* response.
+    // For edge functions, returning a ReadableStream directly is fine, headers are added by the wrapper.
     return new Response(readable, {
       headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
     });
@@ -229,17 +230,6 @@ function convertStreamChunkToOpenAI(geminiChunk, model) {
     model: model,
     choices: [{ index: 0, delta: { content: delta }, finish_reason: geminiChunk.candidates[0].finishReason || null }],
   };
-}
-
-function handleOPTIONS() {
-  return new Response(null, {
-    status: 204,
-    headers: {
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-    },
-  });
 }
 
 export { handleOpenAIRequest };
