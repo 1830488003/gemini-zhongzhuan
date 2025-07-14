@@ -193,28 +193,38 @@ async function streamGeminiToOpenAI(geminiStream, writable, model) {
   const textEncoder = new TextEncoder();
   let buffer = '';
   const now = Math.floor(Date.now() / 1000);
-  const fakeId = `chatcmpl-${now}`;
+  const streamId = `chatcmpl-${now}`;
+  let lastChunk = null;
+
+  // First, send a chunk with the role, but no content.
+  // This is not strictly required, but some clients appreciate it.
+  const initialChunk = {
+    id: streamId,
+    object: 'chat.completion.chunk',
+    created: now,
+    model: model,
+    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+  };
+  await writer.write(textEncoder.encode(`data: ${JSON.stringify(initialChunk)}\n\n`));
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
-        // Send the final stop chunk
-        const stopChunk = { id: fakeId, object: 'chat.completion.chunk', created: now, model: model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
-        writer.write(textEncoder.encode(`data: ${JSON.stringify(stopChunk)}\n\n`));
-        writer.write(textEncoder.encode('data: [DONE]\n\n'));
-        break;
+        break; // Exit loop when stream is done
       }
       buffer += textDecoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop();
+      buffer = lines.pop(); // Keep the last, possibly incomplete line
+
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           try {
             const geminiChunk = JSON.parse(line.substring(6));
-            const openaiChunk = convertStreamChunkToOpenAI(geminiChunk, model, fakeId, now);
+            const openaiChunk = convertStreamChunkToOpenAI(geminiChunk, model, streamId, now);
             if (openaiChunk) {
-              writer.write(textEncoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
+              lastChunk = openaiChunk; // Store the last valid chunk
+              await writer.write(textEncoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
             }
           } catch (e) {
             console.error("Error parsing stream chunk:", line, e);
@@ -222,11 +232,30 @@ async function streamGeminiToOpenAI(geminiStream, writable, model) {
         }
       }
     }
+
+    // After the loop, send the final chunk with the finish_reason.
+    // This is the key change inspired by the reference project.
+    const finalChunk = {
+      id: streamId,
+      object: 'chat.completion.chunk',
+      created: now,
+      model: model,
+      choices: [{
+        index: 0,
+        delta: {}, // No content in the final delta
+        finish_reason: 'stop' // The reason for finishing
+      }],
+    };
+    await writer.write(textEncoder.encode(`data: ${JSON.stringify(finalChunk)}\n\n`));
+
+    // Finally, send the [DONE] signal
+    await writer.write(textEncoder.encode('data: [DONE]\n\n'));
+
   } catch (e) {
     console.error("Error in stream processing:", e);
-    writer.abort(e);
+    await writer.abort(e);
   } finally {
-    writer.close();
+    await writer.close();
   }
 }
 
