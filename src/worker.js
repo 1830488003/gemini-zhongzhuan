@@ -220,6 +220,15 @@ const processCompletionsResponse = (data, model, id) => {
 const sseline = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
 
 async function handleChatCompletions(request) {
+    // Create a controller to manage the outbound fetch request
+    const controller = new AbortController();
+    
+    // Abort the outbound request if the client disconnects
+    request.signal.addEventListener('abort', () => {
+        logger.log('Client disconnected, aborting outbound request.', 'INFO');
+        controller.abort();
+    });
+
     const openaiRequest = await request.clone().json();
     const model = openaiRequest.model || "gemini-1.5-flash";
     const geminiRequest = transformRequestToGemini(openaiRequest);
@@ -246,7 +255,8 @@ async function handleChatCompletions(request) {
             const fetchResponse = await fetch(requestUrl.toString(), {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(geminiRequest)
+                body: JSON.stringify(geminiRequest),
+                signal: controller.signal // Pass the abort signal to the fetch request
             });
 
             if (fetchResponse.ok) {
@@ -262,10 +272,17 @@ async function handleChatCompletions(request) {
             keyManager.reportFailure(apiKey);
 
         } catch (error) {
-            const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
-            attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-            logger.log(`Attempt ${i + 1} FAILED: ${errorMessage}`, 'ERROR');
-            keyManager.reportFailure(apiKey);
+            if (error.name === 'AbortError') {
+                const errorMessage = `Request aborted with key ${keyIdentifier}. This may be due to client timeout or disconnection.`;
+                attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
+                logger.log(errorMessage, 'INFO');
+                // Do not report failure on client-side aborts
+            } else {
+                const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
+                attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
+                logger.log(`Attempt ${i + 1} FAILED: ${errorMessage}`, 'ERROR');
+                keyManager.reportFailure(apiKey);
+            }
         }
     }
 
