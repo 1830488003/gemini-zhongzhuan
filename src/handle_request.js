@@ -9,14 +9,6 @@ export async function handleRequest(request) {
     return handleOpenAIRequest(request);
   }
 
-  // This path is now handled by the publish directory in netlify.toml,
-  // but we keep the logic for other potential environments.
-  if (pathname === '/' || pathname === '/index.html') {
-    return new Response('Proxy is Running! Now with OpenAI compatibility.', {
-      status: 200,
-      headers: { 'Content-Type': 'text/html' }
-    });
-  }
 
   // The original proxy logic for direct Gemini requests.
   // This part of the code is less likely to be used now but is kept for completeness.

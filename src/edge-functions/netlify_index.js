@@ -34,5 +34,5 @@ export default async (req, context) => {
 };
 
 export const config = {
-  path: "/*"
+  path: "/v1/*"
 };
