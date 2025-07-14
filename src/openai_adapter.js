@@ -103,17 +103,25 @@ async function handleChatCompletionsRequest(request) {
 }
 
 function convertRequestToGemini(openaiRequest) {
-  const geminiRequest = { contents: [], generationConfig: {} };
-  for (const message of openaiRequest.messages) {
-    if (message.role === 'user') {
-      geminiRequest.contents.push({ role: 'user', parts: [{ text: message.content }] });
-    } else if (message.role === 'assistant') {
-      geminiRequest.contents.push({ role: 'model', parts: [{ text: message.content }] });
-    }
-  }
+  const geminiRequest = {
+    contents: openaiRequest.messages.map(msg => {
+      const role = msg.role === 'assistant' ? 'model' : 'user';
+      return { role, parts: [{ text: msg.content }] };
+    }),
+    generationConfig: {},
+    // Add safety settings to block none, mirroring the successful example
+    safetySettings: [
+      { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+      { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
+    ],
+  };
+
   if (openaiRequest.max_tokens) geminiRequest.generationConfig.maxOutputTokens = openaiRequest.max_tokens;
   if (openaiRequest.temperature) geminiRequest.generationConfig.temperature = openaiRequest.temperature;
   if (openaiRequest.top_p) geminiRequest.generationConfig.topP = openaiRequest.top_p;
+  
   return geminiRequest;
 }
 
@@ -137,28 +145,17 @@ function convertResponseToOpenAI(geminiResponse, model) {
     return createErrorResponse(geminiResponse.error.message, model, 'gemini_api_error');
   }
 
-  const promptFeedback = geminiResponse.promptFeedback;
-  if (promptFeedback?.blockReason) {
-    return createErrorResponse(`[PROMPT BLOCKED] Reason: ${promptFeedback.blockReason}`, model, 'content_filter');
-  }
-
   const choice = geminiResponse.candidates?.[0];
   if (!choice) {
+    // Handle prompt feedback for blocked prompts
+    if (geminiResponse.promptFeedback?.blockReason) {
+      return createErrorResponse(`[PROMPT BLOCKED] Reason: ${geminiResponse.promptFeedback.blockReason}`, model, 'content_filter');
+    }
     return createErrorResponse('An unknown error occurred: No candidates in response.', model, 'unknown_error');
   }
 
-  let messageContent = '';
+  let messageContent = choice.content?.parts?.[0]?.text || '';
   let finishReason = mapFinishReason(choice.finishReason);
-
-  if (choice.content?.parts?.[0]?.text) {
-    messageContent = choice.content.parts[0].text;
-  } else if (choice.finishReason === 'SAFETY') {
-    messageContent = `[RESPONSE BLOCKED] The response was blocked by Google's safety filters.`;
-    finishReason = 'content_filter';
-  } else if (choice.finishReason === 'RECITATION') {
-    messageContent = `[RESPONSE BLOCKED] The response was blocked due to recitation policy.`;
-    finishReason = 'content_filter';
-  }
 
   const promptTokens = geminiResponse.usageMetadata?.promptTokenCount || 0;
   const completionTokens = geminiResponse.usageMetadata?.candidatesTokenCount || 0;
@@ -172,7 +169,7 @@ function convertResponseToOpenAI(geminiResponse, model) {
     usage: {
       prompt_tokens: promptTokens,
       completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens, // Manually calculate for consistency
+      total_tokens: promptTokens + completionTokens,
     },
   };
 }
@@ -195,11 +192,16 @@ async function streamGeminiToOpenAI(geminiStream, writable, model) {
   const textDecoder = new TextDecoder();
   const textEncoder = new TextEncoder();
   let buffer = '';
+  const now = Math.floor(Date.now() / 1000);
+  const fakeId = `chatcmpl-${now}`;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) {
+        // Send the final stop chunk
+        const stopChunk = { id: fakeId, object: 'chat.completion.chunk', created: now, model: model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] };
+        writer.write(textEncoder.encode(`data: ${JSON.stringify(stopChunk)}\n\n`));
         writer.write(textEncoder.encode('data: [DONE]\n\n'));
         break;
       }
@@ -210,7 +212,7 @@ async function streamGeminiToOpenAI(geminiStream, writable, model) {
         if (line.startsWith('data: ')) {
           try {
             const geminiChunk = JSON.parse(line.substring(6));
-            const openaiChunk = convertStreamChunkToOpenAI(geminiChunk, model);
+            const openaiChunk = convertStreamChunkToOpenAI(geminiChunk, model, fakeId, now);
             if (openaiChunk) {
               writer.write(textEncoder.encode(`data: ${JSON.stringify(openaiChunk)}\n\n`));
             }
@@ -228,10 +230,9 @@ async function streamGeminiToOpenAI(geminiStream, writable, model) {
   }
 }
 
-function convertStreamChunkToOpenAI(geminiChunk, model) {
-  const now = Math.floor(Date.now() / 1000);
+function convertStreamChunkToOpenAI(geminiChunk, model, id, created) {
   if (geminiChunk.error) {
-    return { id: `chatcmpl-${now}`, object: 'chat.completion.chunk', created: now, model: model, choices: [{ index: 0, delta: { content: `Gemini API Error: ${geminiChunk.error.message}` }, finish_reason: 'error' }] };
+    return { id, object: 'chat.completion.chunk', created, model, choices: [{ index: 0, delta: { content: `Gemini API Error: ${geminiChunk.error.message}` }, finish_reason: 'error' }] };
   }
   const choice = geminiChunk.candidates?.[0];
   if (!choice) return null;
@@ -240,12 +241,15 @@ function convertStreamChunkToOpenAI(geminiChunk, model) {
   if (delta === undefined || delta === null) {
     return null;
   }
+  
+  // Per OpenAI spec, stream chunks with content should not have a finish_reason.
+  // The finish_reason is sent in a separate, final chunk.
   return {
-    id: `chatcmpl-${now}`,
+    id,
     object: 'chat.completion.chunk',
-    created: now,
-    model: model,
-    choices: [{ index: 0, delta: { content: delta }, finish_reason: mapFinishReason(choice.finishReason) }],
+    created,
+    model,
+    choices: [{ index: 0, delta: { content: delta }, finish_reason: null }],
   };
 }
 
