@@ -3,11 +3,44 @@
 const GEMINI_API_HOST = "generativelanguage.googleapis.com";
 
 async function handleOpenAIRequest(request) {
+  const url = new URL(request.url);
+  const pathname = url.pathname;
+
   if (request.method === 'OPTIONS') {
     return handleOPTIONS();
   }
 
-  const url = new URL(request.url);
+  if (pathname === '/v1/models') {
+    return handleModelsRequest();
+  }
+
+  if (pathname === '/v1/chat/completions') {
+    return handleChatCompletionsRequest(request);
+  }
+
+  return new Response(JSON.stringify({ error: { message: "Not Found", type: "invalid_request_error" } }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+}
+
+function handleModelsRequest() {
+  // A list of commonly used models.
+  const models = [
+    { id: 'gemini-pro', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
+    { id: 'gemini-1.5-pro-latest', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
+    { id: 'gemini-pro-vision', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
+    { id: 'gemini-1.0-pro', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
+    { id: 'gemini-1.0-pro-vision-latest', object: 'model', created: Math.floor(Date.now() / 1000), owned_by: 'google' },
+  ];
+
+  return new Response(JSON.stringify({
+    object: 'list',
+    data: models,
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+async function handleChatCompletionsRequest(request) {
   // 从请求体中获取模型名称
   const requestBody = await request.json();
   const model = requestBody.model;
