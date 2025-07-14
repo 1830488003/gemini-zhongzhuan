@@ -298,9 +298,37 @@ async function handleChatCompletions(request) {
         return new Response(readable, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
 
     } else {
-        const geminiJson = await response.json();
-        const body = processCompletionsResponse(geminiJson, model, id);
-        return new Response(body, { headers: { "Content-Type": "application/json" } });
+        // Implement "fake streaming" for non-stream requests to keep connections alive.
+        const readableStream = new ReadableStream({
+            async start(controller) {
+                const keepAliveInterval = 15000; // 15 seconds
+                let keepAliveTimer = setInterval(() => {
+                    try {
+                        controller.enqueue(" "); // Send a space as a keep-alive signal
+                    } catch (e) {
+                        console.error("Error sending keep-alive signal:", e);
+                        clearInterval(keepAliveTimer);
+                    }
+                }, keepAliveInterval);
+
+                try {
+                    const geminiJson = await response.json();
+                    const body = processCompletionsResponse(geminiJson, model, id);
+                    controller.enqueue(body); // Send the final JSON response
+                } catch (error) {
+                    console.error("Error processing non-stream response:", error);
+                    const errorResponse = JSON.stringify({
+                        error: { message: "Failed to process backend response.", type: 'server_error' }
+                    });
+                    controller.enqueue(errorResponse);
+                } finally {
+                    clearInterval(keepAliveTimer);
+                    controller.close();
+                }
+            }
+        });
+
+        return new Response(readableStream, { headers: { "Content-Type": "application/json", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
     }
 }
 
