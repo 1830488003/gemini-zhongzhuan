@@ -96,8 +96,15 @@ export default {
       }
 
       // 其他所有接口都需要通过自定义密钥认证
-      const authKey = request.headers.get("Authorization")?.split(" ")[1];
-      if (authKey !== CUSTOM_AUTH_KEY) {
+      const authHeader = request.headers.get("Authorization");
+      let clientKey = authHeader;
+
+      // 兼容处理 "Bearer <key>" 和 "<key>" 两种格式
+      if (authHeader?.startsWith("Bearer ")) {
+        clientKey = authHeader.substring(7);
+      }
+      
+      if (clientKey !== CUSTOM_AUTH_KEY) {
         return new Response("Unauthorized", fixCors({ status: 401 }));
       }
 
