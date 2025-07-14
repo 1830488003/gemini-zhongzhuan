@@ -10,82 +10,73 @@ async function handleOpenAIRequest(request) {
     return handleOPTIONS();
   }
 
-  if (pathname === '/v1/models') {
-    return handleModelsRequest(request); // Pass request to get auth header
-  }
+  try {
+    if (pathname === '/v1/models') {
+      return await handleModelsRequest(request);
+    }
 
-  if (pathname === '/v1/chat/completions') {
-    return handleChatCompletionsRequest(request);
-  }
+    if (pathname === '/v1/chat/completions') {
+      return await handleChatCompletionsRequest(request);
+    }
 
-  return new Response(JSON.stringify({ error: { message: "Not Found", type: "invalid_request_error" } }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: { message: "Not Found", type: "invalid_request_error" } }), { status: 404, headers: { 'Content-Type': 'application/json' } });
+  } catch (e) {
+    console.error("Critical error in handleOpenAIRequest:", e);
+    return new Response(JSON.stringify({
+      error: {
+        message: `An internal error occurred in the proxy: ${e.message}`,
+        type: 'proxy_error'
+      }
+    }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  }
 }
 
 async function handleModelsRequest(request) {
-  // Fetch models dynamically from Google
   const apiKey = request.headers.get('authorization')?.split(' ')?.[1];
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: "Authorization header is missing" }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: { message: "Authorization header is missing", type: "auth_error" } }), { status: 401, headers: { 'Content-Type': 'application/json' } });
   }
 
   const geminiUrl = `https://${GEMINI_API_HOST}/v1beta/models`;
-  const geminiHeaders = new Headers({
-    'Content-Type': 'application/json',
-    'x-goog-api-key': apiKey,
-  });
+  const geminiHeaders = new Headers({ 'x-goog-api-key': apiKey });
 
-  try {
-    const geminiResponse = await fetch(geminiUrl, { headers: geminiHeaders });
-    if (!geminiResponse.ok) {
-      const errorBody = await geminiResponse.text();
-      console.error("Failed to fetch models from Google:", errorBody);
-      return new Response(errorBody, { status: geminiResponse.status, headers: { 'Content-Type': 'application/json' } });
-    }
-
-    const geminiJson = await geminiResponse.json();
-    const openaiModels = geminiJson.models
-      // Filter for models that support 'generateContent' as a proxy for chat models
-      .filter(model => model.supportedGenerationMethods.includes('generateContent'))
-      .map(model => ({
-        id: model.name.replace("models/", ""), // "models/gemini-pro" -> "gemini-pro"
-        object: 'model',
-        created: Math.floor(Date.now() / 1000), // No creation date from Gemini, so we use now
-        owned_by: 'google',
-      }));
-
-    return new Response(JSON.stringify({
-      object: 'list',
-      data: openaiModels,
-    }), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-
-  } catch (e) {
-    console.error("Error fetching/processing models:", e);
-    return new Response(JSON.stringify({ error: "Internal Server Error" }), { status: 500, headers: { 'Content-Type': 'application/json' } });
+  const geminiResponse = await fetch(geminiUrl, { headers: geminiHeaders });
+  if (!geminiResponse.ok) {
+    const errorBody = await geminiResponse.text();
+    console.error("Failed to fetch models from Google:", errorBody);
+    return new Response(errorBody, { status: geminiResponse.status, headers: { 'Content-Type': 'application/json' } });
   }
+
+  const geminiJson = await geminiResponse.json();
+  const openaiModels = geminiJson.models
+    .filter(model => model.supportedGenerationMethods.includes('generateContent'))
+    .map(model => ({
+      id: model.name.replace("models/", ""),
+      object: 'model',
+      created: Math.floor(Date.now() / 1000),
+      owned_by: 'google',
+    }));
+
+  return new Response(JSON.stringify({ object: 'list', data: openaiModels }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
 }
 
 async function handleChatCompletionsRequest(request) {
-  // 从请求体中获取模型名称
   const requestBody = await request.json();
   const model = requestBody.model;
 
   if (!model) {
-    return new Response(JSON.stringify({ error: "Model not specified in the request body" }), { status: 400, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: { message: "Model not specified in the request body", type: "invalid_request_error" } }), { status: 400, headers: { 'Content-Type': 'application/json' } });
   }
 
-  // 构建目标 Gemini URL
   const geminiUrl = `https://${GEMINI_API_HOST}/v1beta/models/${model}:${requestBody.stream ? 'streamGenerateContent' : 'generateContent'}`;
-
-  // 转换请求体
   const geminiRequestBody = convertRequestToGemini(requestBody);
-
-  // 处理 API 密钥
   const apiKey = request.headers.get('authorization')?.split(' ')?.[1];
+
   if (!apiKey) {
-    return new Response(JSON.stringify({ error: "Authorization header is missing" }), { status: 401, headers: { 'Content-Type': 'application/json' } });
+    return new Response(JSON.stringify({ error: { message: "Authorization header is missing", type: "auth_error" } }), { status: 401, headers: { 'Content-Type': 'application/json' } });
   }
 
   const geminiHeaders = new Headers({
@@ -93,97 +84,93 @@ async function handleChatCompletionsRequest(request) {
     'x-goog-api-key': apiKey,
   });
 
-  // 发送请求到 Gemini
   const geminiResponse = await fetch(geminiUrl, {
     method: 'POST',
     headers: geminiHeaders,
     body: JSON.stringify(geminiRequestBody),
   });
 
-  // 转换响应
   if (requestBody.stream) {
     const { readable, writable } = new TransformStream();
     streamGeminiToOpenAI(geminiResponse.body, writable, model);
     return new Response(readable, {
-      headers: {
-        'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
-        'Connection': 'keep-alive',
-      },
+      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', 'Connection': 'keep-alive' },
     });
   } else {
     const geminiJson = await geminiResponse.json();
-    if (geminiJson.error) {
-        return new Response(JSON.stringify(geminiJson), { status: 500, headers: { 'Content-Type': 'application/json' } });
-    }
     const openaiJson = convertResponseToOpenAI(geminiJson, model);
     return new Response(JSON.stringify(openaiJson), {
-      status: geminiResponse.status,
+      status: 200, // Always return 200 OK, as the error is in the JSON body
       headers: { 'Content-Type': 'application/json' },
     });
   }
 }
 
 function convertRequestToGemini(openaiRequest) {
-  const geminiRequest = {
-    contents: [],
-    generationConfig: {},
-  };
-
-  // 转换 messages
+  const geminiRequest = { contents: [], generationConfig: {} };
   for (const message of openaiRequest.messages) {
-    // 忽略 system role for now, as Gemini handles it differently.
-    // A better implementation might merge the system prompt with the first user prompt.
     if (message.role === 'user') {
       geminiRequest.contents.push({ role: 'user', parts: [{ text: message.content }] });
     } else if (message.role === 'assistant') {
       geminiRequest.contents.push({ role: 'model', parts: [{ text: message.content }] });
     }
   }
-
-  // 转换参数
-  if (openaiRequest.max_tokens) {
-    geminiRequest.generationConfig.maxOutputTokens = openaiRequest.max_tokens;
-  }
-  if (openaiRequest.temperature) {
-    geminiRequest.generationConfig.temperature = openaiRequest.temperature;
-  }
-  if (openaiRequest.top_p) {
-    geminiRequest.generationConfig.topP = openaiRequest.top_p;
-  }
-  // Note: stop sequences mapping might be needed
-  // if (openaiRequest.stop) {
-  //   geminiRequest.generationConfig.stopSequences = Array.isArray(openaiRequest.stop) ? openaiRequest.stop : [openaiRequest.stop];
-  // }
-
+  if (openaiRequest.max_tokens) geminiRequest.generationConfig.maxOutputTokens = openaiRequest.max_tokens;
+  if (openaiRequest.temperature) geminiRequest.generationConfig.temperature = openaiRequest.temperature;
+  if (openaiRequest.top_p) geminiRequest.generationConfig.topP = openaiRequest.top_p;
   return geminiRequest;
 }
 
 function convertResponseToOpenAI(geminiResponse, model) {
   const now = Math.floor(Date.now() / 1000);
+  if (geminiResponse.error) {
+    return createErrorResponse(geminiResponse.error.message, model, 'gemini_api_error');
+  }
+
+  const promptFeedback = geminiResponse.promptFeedback;
+  if (promptFeedback?.blockReason) {
+    return createErrorResponse(`[PROMPT BLOCKED] Reason: ${promptFeedback.blockReason}`, model, 'content_filter');
+  }
+
   const choice = geminiResponse.candidates?.[0];
-  const message = choice?.content?.parts?.[0]?.text || '';
+  if (!choice) {
+    return createErrorResponse('An unknown error occurred: No candidates in response.', model, 'unknown_error');
+  }
+
+  let messageContent = '';
+  let finishReason = choice.finishReason || 'stop';
+
+  if (choice.content?.parts?.[0]?.text) {
+    messageContent = choice.content.parts[0].text;
+  } else if (finishReason === 'SAFETY') {
+    messageContent = `[RESPONSE BLOCKED] The response was blocked by Google's safety filters.`;
+  } else if (finishReason === 'RECITATION') {
+    messageContent = `[RESPONSE BLOCKED] The response was blocked due to recitation policy.`;
+  }
 
   return {
     id: `chatcmpl-${now}`,
     object: 'chat.completion',
     created: now,
     model: model,
-    choices: [
-      {
-        index: 0,
-        message: {
-          role: 'assistant',
-          content: message,
-        },
-        finish_reason: choice?.finishReason || 'stop',
-      },
-    ],
+    choices: [{ index: 0, message: { role: 'assistant', content: messageContent }, finish_reason: finishReason }],
     usage: {
       prompt_tokens: geminiResponse.usageMetadata?.promptTokenCount || 0,
       completion_tokens: geminiResponse.usageMetadata?.candidatesTokenCount || 0,
       total_tokens: geminiResponse.usageMetadata?.totalTokenCount || 0,
     },
+  };
+}
+
+function createErrorResponse(message, model, finishReason) {
+  const now = Math.floor(Date.now() / 1000);
+  return {
+    id: `chatcmpl-${now}`,
+    object: 'chat.completion',
+    created: now,
+    model: model,
+    choices: [{ index: 0, message: { role: 'assistant', content: message }, finish_reason: finishReason }],
+    usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
   };
 }
 
@@ -201,13 +188,9 @@ async function streamGeminiToOpenAI(geminiStream, writable, model) {
         writer.write(textEncoder.encode('data: [DONE]\n\n'));
         break;
       }
-
       buffer += textDecoder.decode(value, { stream: true });
-      
-      // Gemini streaming responses are newline-separated JSON chunks
       const lines = buffer.split('\n');
-      buffer = lines.pop(); // Keep the last partial line in the buffer
-
+      buffer = lines.pop();
       for (const line of lines) {
         if (line.startsWith('data: ')) {
           try {
@@ -231,27 +214,21 @@ async function streamGeminiToOpenAI(geminiStream, writable, model) {
 }
 
 function convertStreamChunkToOpenAI(geminiChunk, model) {
-    const now = Math.floor(Date.now() / 1000);
-    const delta = geminiChunk.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!delta) {
-        return null;
-    }
-
-    return {
-        id: `chatcmpl-${now}`,
-        object: 'chat.completion.chunk',
-        created: now,
-        model: model,
-        choices: [
-            {
-                index: 0,
-                delta: {
-                    content: delta,
-                },
-                finish_reason: geminiChunk.candidates[0].finishReason || null,
-            },
-        ],
-    };
+  const now = Math.floor(Date.now() / 1000);
+  if (geminiChunk.error) {
+    return { id: `chatcmpl-${now}`, object: 'chat.completion.chunk', created: now, model: model, choices: [{ index: 0, delta: { content: `Gemini API Error: ${geminiChunk.error.message}` }, finish_reason: 'error' }] };
+  }
+  const delta = geminiChunk.candidates?.[0]?.content?.parts?.[0]?.text;
+  if (delta === undefined || delta === null) {
+    return null;
+  }
+  return {
+    id: `chatcmpl-${now}`,
+    object: 'chat.completion.chunk',
+    created: now,
+    model: model,
+    choices: [{ index: 0, delta: { content: delta }, finish_reason: geminiChunk.candidates[0].finishReason || null }],
+  };
 }
 
 function handleOPTIONS() {
