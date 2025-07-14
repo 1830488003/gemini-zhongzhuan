@@ -1,35 +1,115 @@
 import { Buffer } from "node:buffer";
 
+// --- 配置区 ---
+// 1. 自定义访问密钥，客户端需要用这个密钥来访问此服务
+const CUSTOM_AUTH_KEY = "67564534";
+
+// 2. Google API 密钥列表 (将从环境变量 GEMINI_API_KEYS 中加载)
+let geminiApiKeys = [];
+
+// 3. 重试次数
+const MAX_RETRIES = 5;
+// --- 配置区结束 ---
+
+
+/**
+ * 使用随机轮换和重试机制来执行 fetch 请求
+ * @param {string} url
+ * @param {object} options
+ * @returns {Promise<Response>}
+ */
+const fetchWithRetry = async (url, options) => {
+  if (geminiApiKeys.length === 0) {
+    throw new HttpError("No Google API keys configured. Please set the GEMINI_API_KEYS environment variable.", 500);
+  }
+
+  // 创建一个本次请求专用的、随机打乱的密钥列表副本
+  const shuffledKeys = [...geminiApiKeys].sort(() => 0.5 - Math.random());
+
+  for (let i = 0; i < MAX_RETRIES; i++) {
+    // 如果没有更多可用密钥，则停止重试
+    if (shuffledKeys.length === 0) {
+      throw new HttpError(`All ${geminiApiKeys.length} API keys failed after ${i} retries.`, 500);
+    }
+
+    // 从打乱的列表中取出一个密钥
+    const currentApiKey = shuffledKeys.pop();
+    
+    // 更新请求头中的 API Key
+    const newHeaders = new Headers(options.headers);
+    newHeaders.set("x-goog-api-key", currentApiKey);
+    const newOptions = { ...options, headers: newHeaders };
+
+    try {
+      console.log(`Attempt ${i + 1}/${MAX_RETRIES} using key ending with ...${currentApiKey.slice(-4)}`);
+      const response = await fetch(url, newOptions);
+      
+      // 如果成功或遇到非服务器错误（如 4xx 客户端错误），则直接返回，不再重试
+      if (response.ok || response.status < 500) {
+        return response;
+      }
+      
+      console.error(`Attempt ${i + 1} failed with status ${response.status}. Retrying with a new key...`);
+
+    } catch (error) {
+      console.error(`Attempt ${i + 1} failed with error: ${error.message}. Retrying with a new key...`);
+    }
+  }
+
+  throw new HttpError(`Failed to fetch from Google API after ${MAX_RETRIES} retries.`, 502);
+};
+
+
 export default {
-  async fetch (request) {
+  /**
+   * Netlify Edge Function 的主入口
+   * @param {Request} request
+   * @param {object} env - 环境变量
+   */
+  async fetch (request, env) {
+    // 首次运行时，从环境变量加载 Google API 密钥
+    if (env.GEMINI_API_KEYS && geminiApiKeys.length === 0) {
+        geminiApiKeys = env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean);
+        if (geminiApiKeys.length > 0) {
+          console.log(`Successfully loaded ${geminiApiKeys.length} Google API keys.`);
+        }
+    }
+
     if (request.method === "OPTIONS") {
       return handleOPTIONS();
     }
+
+    // 验证客户端提供的自定义密钥
+    const authKey = request.headers.get("Authorization")?.split(" ")[1];
+    if (authKey !== CUSTOM_AUTH_KEY) {
+      return new Response("Unauthorized", fixCors({ status: 401 }));
+    }
+
     const errHandler = (err) => {
       console.error(err);
       return new Response(err.message, fixCors({ status: err.status ?? 500 }));
     };
+
     try {
-      const auth = request.headers.get("Authorization");
-      const apiKey = auth?.split(" ")[1];
+      const { pathname } = new URL(request.url);
       const assert = (success) => {
         if (!success) {
           throw new HttpError("The specified HTTP method is not allowed for the requested resource", 400);
         }
       };
-      const { pathname } = new URL(request.url);
+      
       switch (true) {
         case pathname.endsWith("/chat/completions"):
           assert(request.method === "POST");
-          return handleCompletions(await request.json(), apiKey)
+          return handleCompletions(await request.json())
             .catch(errHandler);
         case pathname.endsWith("/embeddings"):
           assert(request.method === "POST");
-          return handleEmbeddings(await request.json(), apiKey)
+          return handleEmbeddings(await request.json())
             .catch(errHandler);
         case pathname.endsWith("/models"):
           assert(request.method === "GET");
-          return handleModels(apiKey)
+          return handleModels()
             .catch(errHandler);
         default:
           throw new HttpError("404 Not Found", 404);
@@ -66,18 +146,16 @@ const handleOPTIONS = async () => {
 
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
+const API_CLIENT = "genai-js/0.21.0";
 
-// https://github.com/google-gemini/generative-ai-js/blob/cf223ff4a1ee5a2d944c53cddb8976136382bee6/src/requests/request.ts#L71
-const API_CLIENT = "genai-js/0.21.0"; // npm view @google/generative-ai version
-const makeHeaders = (apiKey, more) => ({
+const makeHeaders = (more) => ({
   "x-goog-api-client": API_CLIENT,
-  ...(apiKey && { "x-goog-api-key": apiKey }),
   ...more
 });
 
-async function handleModels (apiKey) {
-  const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, {
-    headers: makeHeaders(apiKey),
+async function handleModels () {
+  const response = await fetchWithRetry(`${BASE_URL}/${API_VERSION}/models`, {
+    headers: makeHeaders(),
   });
   let { body } = response;
   if (response.ok) {
@@ -96,7 +174,7 @@ async function handleModels (apiKey) {
 }
 
 const DEFAULT_EMBEDDINGS_MODEL = "text-embedding-004";
-async function handleEmbeddings (req, apiKey) {
+async function handleEmbeddings (req) {
   if (typeof req.model !== "string") {
     throw new HttpError("model is not specified", 400);
   }
@@ -112,9 +190,9 @@ async function handleEmbeddings (req, apiKey) {
   if (!Array.isArray(req.input)) {
     req.input = [ req.input ];
   }
-  const response = await fetch(`${BASE_URL}/${API_VERSION}/${model}:batchEmbedContents`, {
+  const response = await fetchWithRetry(`${BASE_URL}/${API_VERSION}/${model}:batchEmbedContents`, {
     method: "POST",
-    headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
+    headers: makeHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       "requests": req.input.map(text => ({
         model,
@@ -140,7 +218,7 @@ async function handleEmbeddings (req, apiKey) {
 }
 
 const DEFAULT_MODEL = "gemini-1.5-flash";
-async function handleCompletions (req, apiKey) {
+async function handleCompletions (req) {
   let model = DEFAULT_MODEL;
   switch (true) {
     case typeof req.model !== "string":
@@ -177,15 +255,15 @@ async function handleCompletions (req, apiKey) {
   const TASK = req.stream ? "streamGenerateContent" : "generateContent";
   let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
   if (req.stream) { url += "?alt=sse"; }
-  const response = await fetch(url, {
+  const response = await fetchWithRetry(url, {
     method: "POST",
-    headers: makeHeaders(apiKey, { "Content-Type": "application/json" }),
+    headers: makeHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify(body),
   });
 
   body = response.body;
   if (response.ok) {
-    let id = "chatcmpl-" + generateId(); //"chatcmpl-8pMMaqXMK68B3nyDBrapTDrhkHBQK";
+    let id = "chatcmpl-" + generateId();
     const shared = {};
     if (req.stream) {
       body = response.body
@@ -213,7 +291,7 @@ async function handleCompletions (req, apiKey) {
         }
       } catch (err) {
         console.error("Error parsing response:", err);
-        return new Response(body, fixCors(response)); // output as is
+        return new Response(body, fixCors(response));
       }
       body = processCompletionsResponse(body, model, id);
     }
@@ -255,12 +333,12 @@ const fieldsMap = {
   frequency_penalty: "frequencyPenalty",
   max_completion_tokens: "maxOutputTokens",
   max_tokens: "maxOutputTokens",
-  n: "candidateCount", // not for streaming
+  n: "candidateCount",
   presence_penalty: "presencePenalty",
   seed: "seed",
   stop: "stopSequences",
   temperature: "temperature",
-  top_k: "topK", // non-standard
+  top_k: "topK",
   top_p: "topP",
 };
 const thinkingBudgetMap = {
@@ -270,7 +348,6 @@ const thinkingBudgetMap = {
 };
 const transformConfig = (req) => {
   let cfg = {};
-  //if (typeof req.stop === "string") { req.stop = [req.stop]; } // no need
   for (let key in req) {
     const matchedKey = fieldsMap[key];
     if (matchedKey) {
@@ -286,7 +363,6 @@ const transformConfig = (req) => {
           cfg.responseMimeType = "text/x.enum";
           break;
         }
-        // eslint-disable-next-line no-fallthrough
       case "json_object":
         cfg.responseMimeType = "application/json";
         break;
@@ -393,15 +469,9 @@ const transformFnCalls = ({ tool_calls }) => {
 const transformMsg = async ({ content }) => {
   const parts = [];
   if (!Array.isArray(content)) {
-    // system, user: string
-    // assistant: string or null (Required unless tool_calls is specified.)
     parts.push({ text: content });
     return parts;
   }
-  // user:
-  // An array of content parts with a defined type.
-  // Supported options differ based on the model being used to generate the response.
-  // Can contain text, image, or audio inputs.
   for (const item of content) {
     switch (item.type) {
       case "text":
@@ -423,7 +493,7 @@ const transformMsg = async ({ content }) => {
     }
   }
   if (content.every(item => item.type === "image_url")) {
-    parts.push({ text: "" }); // to avoid "Unable to submit request because it must have a text parameter"
+    parts.push({ text: "" });
   }
   return parts;
 };
@@ -438,13 +508,12 @@ const transformMessages = async (messages) => {
         system_instruction = { parts: await transformMsg(item) };
         continue;
       case "tool":
-        // eslint-disable-next-line no-case-declarations
         let { role, parts } = contents[contents.length - 1] ?? {};
         if (role !== "function") {
           const calls = parts?.calls;
           parts = []; parts.calls = calls;
           contents.push({
-            role: "function", // ignored
+            role: "function",
             parts
           });
         }
@@ -468,7 +537,6 @@ const transformMessages = async (messages) => {
       contents.unshift({ role: "user", parts: { text: " " } });
     }
   }
-  //console.info(JSON.stringify(contents, 2));
   return { system_instruction, contents };
 };
 
@@ -506,13 +574,11 @@ const generateId = () => {
   return Array.from({ length: 29 }, randomChar).join("");
 };
 
-const reasonsMap = { //https://ai.google.dev/api/rest/v1/GenerateContentResponse#finishreason
-  //"FINISH_REASON_UNSPECIFIED": // Default value. This value is unused.
+const reasonsMap = {
   "STOP": "stop",
   "MAX_TOKENS": "length",
   "SAFETY": "content_filter",
   "RECITATION": "content_filter",
-  //"OTHER": "OTHER",
 };
 const SEP = "\n\n|>";
 const transformCandidates = (key, cand) => {
@@ -535,11 +601,10 @@ const transformCandidates = (key, cand) => {
   }
   message.content = message.content.join(SEP) || null;
   return {
-    index: cand.index || 0, // 0-index is absent in new -002 models response
+    index: cand.index || 0,
     [key]: message,
     logprobs: null,
     finish_reason: message.tool_calls ? "tool_calls" : reasonsMap[cand.finishReason] || cand.finishReason,
-    //original_finish_reason: cand.finishReason,
   };
 };
 const transformCandidatesMessage = transformCandidates.bind(null, "message");
@@ -564,7 +629,6 @@ const checkPromptBlock = (choices, promptFeedback, key) => {
       index: 0,
       [key]: null,
       finish_reason: "content_filter",
-      //original_finish_reason: data.promptFeedback.blockReason,
     });
   }
   return true;
@@ -576,7 +640,6 @@ const processCompletionsResponse = (data, model, id) => {
     choices: data.candidates.map(transformCandidatesMessage),
     created: Math.floor(Date.now()/1000),
     model: data.modelVersion ?? model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion",
     usage: data.usageMetadata && transformUsage(data.usageMetadata),
   };
@@ -594,7 +657,7 @@ function parseStream (chunk, controller) {
     if (!match) { break; }
     controller.enqueue(match[1]);
     this.buffer = this.buffer.substring(match[0].length);
-  } while (true); // eslint-disable-line no-constant-condition
+  } while (true);
 }
 function parseStreamFlush (controller) {
   if (this.buffer) {
@@ -619,15 +682,13 @@ function toOpenAiStream (line, controller) {
   } catch (err) {
     console.error("Error parsing response:", err);
     if (!this.shared.is_buffers_rest) { line =+ delimiter; }
-    controller.enqueue(line); // output as is
+    controller.enqueue(line);
     return;
   }
   const obj = {
     id: this.id,
     choices: data.candidates.map(transformCandidatesDelta),
-    //created: Math.floor(Date.now()/1000),
     model: data.modelVersion ?? this.model,
-    //system_fingerprint: "fp_69829325d0",
     object: "chat.completion.chunk",
     usage: data.usageMetadata && this.streamIncludeUsage ? null : undefined,
   };
@@ -637,17 +698,17 @@ function toOpenAiStream (line, controller) {
   }
   console.assert(data.candidates.length === 1, "Unexpected candidates count: %d", data.candidates.length);
   const cand = obj.choices[0];
-  cand.index = cand.index || 0; // absent in new -002 models response
+  cand.index = cand.index || 0;
   const finish_reason = cand.finish_reason;
   cand.finish_reason = null;
-  if (!this.last[cand.index]) { // first
+  if (!this.last[cand.index]) {
     controller.enqueue(sseline({
       ...obj,
       choices: [{ ...cand, tool_calls: undefined, delta: { role: "assistant", content: "" } }],
     }));
   }
   delete cand.delta.role;
-  if ("content" in cand.delta) { // prevent empty data (e.g. when MAX_TOKENS)
+  if ("content" in cand.delta) {
     controller.enqueue(sseline(obj));
   }
   cand.finish_reason = finish_reason;
