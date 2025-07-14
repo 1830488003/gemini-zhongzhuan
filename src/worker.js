@@ -69,66 +69,8 @@ class KeyManager {
   }
 }
 
-/**
- * Manages active in-flight requests to avoid duplicate API calls.
- */
-class ActiveRequestManager {
-    constructor() {
-        /** @type {Map<string, Promise<Response>>} */
-        this.pending = new Map();
-    }
-
-    /**
-     * @param {string} key
-     * @returns {Promise<Response> | undefined}
-     */
-    get(key) {
-        return this.pending.get(key);
-    }
-
-    /**
-     * @param {string} key
-     * @param {Promise<Response>} promise
-     */
-    add(key, promise) {
-        this.pending.set(key, promise);
-        // Ensure the promise is removed from the map once it's settled.
-        promise.finally(() => {
-            this.pending.delete(key);
-        });
-    }
-}
-
-
 // --- Global Instances ---
 const keyManager = new KeyManager();
-const activeRequestManager = new ActiveRequestManager();
-
-
-// --- Utility Functions ---
-
-/**
- * Generates a stable SHA-256 hash for a given request object.
- * @param {any} obj
- * @returns {Promise<string>}
- */
-async function generateRequestHash(obj) {
-    const stableString = JSON.stringify(obj);
-    const encoder = new TextEncoder();
-    const data = encoder.encode(stableString);
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data);
-    const hashArray = Array.from(new Uint8Array(hashBuffer));
-    return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
-}
-
-
-function verifyAuth(request) {
-  const authHeader = request.headers.get("Authorization") || "";
-  const clientKey = authHeader.startsWith("Bearer ") ? authHeader.substring(7) : authHeader;
-  if (clientKey !== CUSTOM_AUTH_KEY) {
-    throw new HttpError("Unauthorized", 401);
-  }
-}
 
 // --- Data Transformation ---
 
@@ -179,26 +121,80 @@ function transformRequestToGemini(openaiRequest) {
   return geminiRequest;
 }
 
-function transformStreamChunkToOpenAI(geminiChunk, id, model) {
-    if (!geminiChunk.candidates) return "";
-    const content = geminiChunk.candidates[0]?.content?.parts?.[0]?.text || "";
-    const choice = { index: 0, delta: { content }, finish_reason: geminiChunk.candidates[0]?.finishReason ? "stop" : null };
-    return `data: ${JSON.stringify({ id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [choice] })}\n\n`;
-}
-
 // --- Core Request Logic ---
 
-/**
- * Executes the actual fetch to the Google API and handles the response.
- * This is wrapped by handleChatCompletions to add request coalescing.
- */
-async function executeChatCompletion(request) {
+const generateId = () => {
+  const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const randomChar = () => characters[Math.floor(Math.random() * characters.length)];
+  return Array.from({ length: 29 }, randomChar).join("");
+};
+
+const reasonsMap = {
+  "STOP": "stop",
+  "MAX_TOKENS": "length",
+  "SAFETY": "content_filter",
+  "RECITATION": "content_filter",
+};
+
+const transformCandidates = (key, cand) => {
+  const message = { role: "assistant", content: null };
+  if (cand.content?.parts?.[0]?.text) {
+    message.content = cand.content.parts[0].text;
+  }
+  return {
+    index: cand.index || 0,
+    [key]: message,
+    logprobs: null,
+    finish_reason: reasonsMap[cand.finishReason] || cand.finishReason,
+  };
+};
+const transformCandidatesMessage = transformCandidates.bind(null, "message");
+const transformCandidatesDelta = transformCandidates.bind(null, "delta");
+
+const transformUsage = (data) => ({
+  completion_tokens: data.candidatesTokenCount,
+  prompt_tokens: data.promptTokenCount,
+  total_tokens: data.totalTokenCount
+});
+
+const checkPromptBlock = (choices, promptFeedback, key) => {
+  if (choices.length) { return; }
+  if (promptFeedback?.blockReason) {
+    choices.push({
+      index: 0,
+      [key]: null,
+      finish_reason: "content_filter",
+    });
+  }
+  return true;
+};
+
+const processCompletionsResponse = (data, model, id) => {
+  const obj = {
+    id,
+    choices: data.candidates.map(transformCandidatesMessage),
+    created: Math.floor(Date.now()/1000),
+    model: model,
+    object: "chat.completion",
+    usage: data.usageMetadata && transformUsage(data.usageMetadata),
+  };
+  if (obj.choices.length === 0 ) {
+    checkPromptBlock(obj.choices, data.promptFeedback, "message");
+  }
+  return JSON.stringify(obj);
+};
+
+const sseline = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
+
+async function handleChatCompletions(request) {
     const openaiRequest = await request.clone().json();
     const model = openaiRequest.model || "gemini-1.5-flash";
     const geminiRequest = transformRequestToGemini(openaiRequest);
     const stream = openaiRequest.stream || false;
-    const url = `${BASE_URL}/${API_VERSION}/models/${model}:${stream ? "streamGenerateContent" : "generateContent"}`;
-    let lastError = null;
+    const url = `${BASE_URL}/${API_VERSION}/models/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
+    
+    let response;
+    let lastError;
 
     for (let i = 0; i < 5; i++) {
         const apiKey = keyManager.getKey();
@@ -207,89 +203,104 @@ async function executeChatCompletion(request) {
         requestUrl.searchParams.set("key", apiKey);
 
         try {
-            const response = await fetch(requestUrl.toString(), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(geminiRequest) });
-            if (response.ok) {
-                // To make the response body reusable for coalesced requests, we need to clone it.
-                return response.clone();
+            const fetchResponse = await fetch(requestUrl.toString(), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(geminiRequest)
+            });
+
+            if (fetchResponse.ok) {
+                response = fetchResponse;
+                break; // Success
             }
             keyManager.reportFailure(apiKey);
-            lastError = new HttpError(`Google API returned status ${response.status}`, response.status);
+            lastError = new HttpError(`Google API returned status ${fetchResponse.status}`, fetchResponse.status);
         } catch (error) {
             keyManager.reportFailure(apiKey);
             lastError = error;
         }
     }
-    throw lastError || new HttpError("All API key attempts failed.", 500);
-}
 
-
-async function handleChatCompletions(request) {
-    const requestBody = await request.clone().json();
-    const hashKey = await generateRequestHash(requestBody);
-    
-    let pendingPromise = activeRequestManager.get(hashKey);
-    if (pendingPromise) {
-        console.log(`Request coalescing: Found active request for hash ${hashKey.slice(0, 8)}...`);
-        return (await pendingPromise).clone();
+    if (!response) {
+        throw lastError || new HttpError("All API key attempts failed.", 500);
     }
 
-    const executionPromise = executeChatCompletion(request);
-    activeRequestManager.add(hashKey, executionPromise);
-    
-    const response = await executionPromise;
+    const id = `chatcmpl-${generateId()}`;
 
-    // Process the response for the original caller
-    if (requestBody.stream) {
-        const id = `chatcmpl-${Date.now()}`;
-        const model = requestBody.model || "gemini-1.5-flash";
-        const { readable, writable } = new TransformStream();
-        const writer = writable.getWriter();
-        const encoder = new TextEncoder();
-        const body = response.body;
-        if (!body) throw new HttpError("Response body is null", 500);
-        const reader = body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-        (async () => {
-            try {
-                while (true) {
-                    const { done, value } = await reader.read();
-                    if (done) break;
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split("\n");
-                    buffer = lines.pop() || "";
+    if (stream) {
+        if (!response.body) {
+            throw new HttpError("Response body is null", 500);
+        }
+
+        const streamState = {
+            buffer: "",
+            firstChunkSent: false,
+        };
+
+        const readable = response.body
+            .pipeThrough(new TextDecoderStream())
+            .pipeThrough(new TransformStream({
+                transform(chunk, controller) {
+                    streamState.buffer += chunk;
+                    const lines = streamState.buffer.split("\n");
+                    streamState.buffer = lines.pop() || "";
                     for (const line of lines) {
                         if (line.startsWith("data: ")) {
                             try {
-                                const jsonStr = line.substring(6);
-                                const geminiChunk = JSON.parse(jsonStr);
-                                const openaiChunk = transformStreamChunkToOpenAI(geminiChunk, id, model);
-                                if (openaiChunk) writer.write(encoder.encode(openaiChunk));
-                            } catch (e) { console.error("Error parsing stream chunk:", e, "Line:", line); }
+                                controller.enqueue(JSON.parse(line.substring(6)));
+                            } catch (e) {
+                                console.error("Could not parse stream line:", line);
+                            }
                         }
                     }
                 }
-            } catch (e) { writer.abort(e); }
-            finally {
-                writer.write(encoder.encode("data: [DONE]\n\n"));
-                writer.close();
-            }
-        })();
-        return new Response(readable, { headers: { "Content-Type": "text/event-stream" } });
+            }))
+            .pipeThrough(new TransformStream({
+                transform(geminiChunk, controller) {
+                    if (!geminiChunk.candidates) {
+                        console.error("Invalid stream chunk:", geminiChunk);
+                        return;
+                    }
+                    const created = Math.floor(Date.now() / 1000);
+                    const choice = transformCandidatesDelta(geminiChunk.candidates[0]);
+                    
+                    if (!streamState.firstChunkSent) {
+                        controller.enqueue(sseline({
+                            id, created, model, object: "chat.completion.chunk",
+                            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
+                        }));
+                        streamState.firstChunkSent = true;
+                    }
+                    
+                    const content = choice.delta.content;
+                    const finish_reason = choice.finish_reason;
+
+                    if (content) {
+                         controller.enqueue(sseline({
+                            id, created, model, object: "chat.completion.chunk",
+                            choices: [{ index: choice.index, delta: { content }, finish_reason: null }]
+                        }));
+                    }
+
+                    if (finish_reason) {
+                        controller.enqueue(sseline({
+                            id, created, model, object: "chat.completion.chunk",
+                            choices: [{ index: choice.index, delta: {}, finish_reason: finish_reason }]
+                        }));
+                    }
+                },
+                flush(controller) {
+                    controller.enqueue("data: [DONE]\n\n");
+                }
+            }))
+            .pipeThrough(new TextEncoderStream());
+        
+        return new Response(readable, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
+
     } else {
         const geminiJson = await response.json();
-        if (!geminiJson.candidates) throw new HttpError("Invalid response from Gemini", 500);
-        const content = geminiJson.candidates[0].content?.parts?.[0]?.text || "";
-        const openaiResponse = {
-            id: `chatcmpl-${Date.now()}`, object: "chat.completion", created: Math.floor(Date.now() / 1000), model: requestBody.model || "gemini-1.5-flash",
-            choices: [{ index: 0, message: { role: "assistant", content }, finish_reason: "stop" }],
-            usage: {
-                prompt_tokens: geminiJson.usageMetadata?.promptTokenCount || 0,
-                completion_tokens: geminiJson.usageMetadata?.candidatesTokenCount || 0,
-                total_tokens: geminiJson.usageMetadata?.totalTokenCount || 0,
-            },
-        };
-        return new Response(JSON.stringify(openaiResponse), { headers: { "Content-Type": "application/json" } });
+        const body = processCompletionsResponse(geminiJson, model, id);
+        return new Response(body, { headers: { "Content-Type": "application/json" } });
     }
 }
 
@@ -357,8 +368,7 @@ async function handleRequest(request, env) {
       return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "*", "Access-Control-Allow-Headers": "*" } });
     }
 
-    // No longer need to load keys from env, they are built-in.
-    verifyAuth(request);
+    // verifyAuth(request); // Removed custom auth to allow any key from client.
 
     const { pathname } = new URL(request.url);
     if (pathname.endsWith("/chat/completions")) {

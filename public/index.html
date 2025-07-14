@@ -132,11 +132,11 @@
             if (data) {
                 diagResults.innerHTML = `
                     <div class="status-item">
-                        <h3>环境变量</h3>
-                        <p>${data.keys_loaded > 0 ? '✅ 成功加载' : '❌ 未加载'}</p>
+                        <h3>密钥池状态</h3>
+                        <p>${data.keys_loaded > 0 ? '✅ 初始化成功' : '❌ 初始化失败'}</p>
                     </div>
                     <div class="status-item">
-                        <h3>Google API 密钥数量</h3>
+                        <h3>内置密钥总数</h3>
                         <p>${data.keys_loaded} 个</p>
                     </div>
                     <div class="status-item">
