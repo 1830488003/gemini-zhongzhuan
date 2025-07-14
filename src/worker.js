@@ -27,23 +27,28 @@ class HttpError extends Error {
 class KeyManager {
   constructor() {
     /** @type {string[]} */
-    this.keys = [];
+    this.keys = [
+      "AIzaSyB8WZAjGkNvOsJbcnstmCRHZ7WyJ01r8TY", "AIzaSyAXDoNlu9u5dFhbJhkqru9iZXTd2yYn5-8", "AIzaSyAs9OfZmteNgOxy6L3AOQigZlzs8XAs8Jw",
+      "AIzaSyBkaiGeEnkive8WwvMAEAne-nbfI4H2vyY", "AIzaSyDe2Viw5hlNTQM5gjQzl_mJqCMxFaSj3uA", "AIzaSyCR2faMADtxo8Hx8zhx-7b2eaEsuZQTtvY",
+      "AIzaSyC7BsBAmQBZ8HsfqCjncYBwrwP5yiFXSRQ", "AIzaSyDw-Rju2wboU3hwwpIHg45x5R-IvvU1x38", "AIzaSyABlzNmp2RGAxxV5e13xs788ockChqSaTs",
+      "AIzaSyACXBpBeJVH5hKzjM2i9Q5iMXwuBaQHADw", "AIzaSyDGETtwiz0HGTq8N2WBtyIplFM8qI2DvUY", "AIzaSyDJnBIUWUvHx3BgJhWJF6i_f9U8hPB7MPs",
+      "AIzaSyB7HyFvYk6OCE9fMLQgAqGE86Vm2sndSdU", "AIzaSyAZnSkEYTrHDllSnUJN5Z4X7Gk6LgolOlQ", "AIzaSyBeKUxcOmpZhMJBsb6p35qZudj2ZrhCE-k",
+      "AIzaSyDXVEqcRws1t69t1WZRdgxA7wbCHuqHCXw", "AIzaSyAZusyRzdrVBJpuI10f-8WE2WWKaeFh7X8", "AIzaSyDEC9CGlCL6mJtHwJ8yCLKTSJ4tw0r0Bkw",
+      "AIzaSyC1U9RoDbO1ZKEGODAqmsq3xTymtDXIln8", "AIzaSyC1gvzCnW-uXVrhgAz0avPxdEzDBZ84BhE", "AIzaSyDg3bGQE2kRidsza75Jgqd1aLAx1fOkoJg",
+      "AIzaSyBycxkw4QcR0WfJii76jJMXqZ6LlbGcaEU", "AIzaSyD-Nck_RoMaC2qc6PFVfaE7GTMNOe4y1D0", "AIzaSyA-ruVqZupqv0qT8oRAWku9xnYbKfrLwkQ",
+      "AIzaSyAVKooPAg-S4MKcebFoSbaUNkVzDzFoIo4", "AIzaSyDE3Ojsaf1T8iGqnd_kHchLjge31eUPoJ4", "AIzaSyBeE75a3zINtAIwG4V1UL175aSjNb6pW9c",
+      "AIzaSyAlL3tlKO22DrIDkmqs9ScJWFNFwfN4QEI", "AIzaSyBZdBawDf8ZPAKdxHtiywMsV5eHVGlL6Fo", "AIzaSyDNuuj3YPSpdbsfExNJu0PJnz-PXDIQTrs",
+      "AIzaSyDt--WY2xGoqM_XNyNMTmq9t5Zqqq1t0tQ", "AIzaSyCqD4Uxj9DjUuqg1ORz2ncZrfcZ9ZebdWw", "AIzaSyDBUenFxYtpl_SH5XDBtbJqLPOH540B9xk",
+      "AIzaSyDbc_oT_gcii4LDK6fcqZ8NHNoDdKMOgOU", "AIzaSyB7LOzoGW5DC3q-u6eupw14UoAh_3rZxQ0", "AIzaSyDxawl15iofU9tXv-7SvRVENDlDEtaY5M4",
+      "AIzaSyArF3Fb8UHz3fYB8hhmRot1nXOZ7b7Og0M", "AIzaSyApJqDcpJ6EeuM0149xP-UU0WtO76OWZrg", "AIzaSyBd240-bXhtrSv2l7cU1ii5G8-DBQfS0HA",
+      "AIzaSyANug4zv8RMBBjyCOZHpMZmKaWTA71KJDw", "AIzaSyB8mSPkJ-kxXTV3gf300C9YjkUceM5d2bM", "AIzaSyAedrnoL7BXuKbOLZM-z6Ll-kLEeYZBQ28",
+      "AIzaSyBsX7XxZGj21wMc7Jz3TQ2jPORl3bEIrP8", "AIzaSyDCfTx9vssaUE32lhgNwSMYqyzS5P2HghU", "AIzaSyDrogC_c1_ettNZ2RVCDcbkVVN4pRndH4I",
+      "AIzaSyAo1gjCJwTOdmSeFjphBOgH_OYU-j9awBM", "AIzaSyCcgSeznPu_I75xhxOk-dr7DdIG5unaeQM"
+    ];
     /** @type {Map<string, number>} */
-    this.failedKeys = new Map();
+    this.failedKeys = new Map(); // Store key and timestamp of failure
     this.FAILURE_COOLDOWN = 10 * 60 * 1000; // 10 minutes
-  }
-
-  loadKeys(env) {
-    // This is now designed to run on every request for robustness in a serverless environment.
-    // It ensures that if env vars are not available on a cold start, they will be picked up on subsequent requests.
-    if (env && env.GEMINI_API_KEYS) {
-      const newKeys = env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean);
-      // To avoid log spam, only log when the keys are loaded for the first time or have changed.
-      if (this.keys.length !== newKeys.length || this.keys.some((key, i) => key !== newKeys[i])) {
-        this.keys = newKeys;
-        console.log(`KeyManager: Loaded or updated ${this.keys.length} keys.`);
-      }
-    }
+    console.log(`KeyManager: Initialized with ${this.keys.length} built-in keys.`);
   }
 
   getKey() {
@@ -352,7 +357,7 @@ async function handleRequest(request, env) {
       return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "*", "Access-Control-Allow-Headers": "*" } });
     }
 
-    keyManager.loadKeys(env);
+    // No longer need to load keys from env, they are built-in.
     verifyAuth(request);
 
     const { pathname } = new URL(request.url);
