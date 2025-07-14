@@ -67,24 +67,24 @@ export default {
    * @param {object} env - 环境变量
    */
   async fetch (request, env) {
-    // 首次运行时，从环境变量加载 Google API 密钥
-    if (env.GEMINI_API_KEYS && geminiApiKeys.length === 0) {
-        geminiApiKeys = env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean);
-        if (geminiApiKeys.length > 0) {
-          console.log(`Successfully loaded ${geminiApiKeys.length} Google API keys.`);
-        }
-    }
-
-    if (request.method === "OPTIONS") {
-      return handleOPTIONS();
-    }
-
     const errHandler = (err) => {
       console.error(err);
       return new Response(err.message, fixCors({ status: err.status ?? 500 }));
     };
 
     try {
+      // 将密钥加载和 OPTIONS 请求处理移入 try 块
+      if (env && env.GEMINI_API_KEYS && geminiApiKeys.length === 0) {
+          geminiApiKeys = env.GEMINI_API_KEYS.split(",").map(k => k.trim()).filter(Boolean);
+          if (geminiApiKeys.length > 0) {
+            console.log(`Successfully loaded ${geminiApiKeys.length} Google API keys.`);
+          }
+      }
+
+      if (request.method === "OPTIONS") {
+        return handleOPTIONS();
+      }
+
       const { pathname } = new URL(request.url);
 
       // 公开的密钥测试接口，无需认证
