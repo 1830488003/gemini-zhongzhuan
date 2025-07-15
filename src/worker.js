@@ -214,16 +214,78 @@ const processCompletionsResponse = (data, model, id) => {
   if (obj.choices.length === 0 ) {
     checkPromptBlock(obj.choices, data.promptFeedback, "message");
   }
-  return JSON.stringify(obj);
+  return obj;
 };
 
 const sseline = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
 
+async function executeNonStreamRequest(model, geminiRequest, signal) {
+    const url = `${BASE_URL}/${API_VERSION}/models/${model}:generateContent`;
+    const retryAttempts = 5;
+    const attemptLogs = [];
+
+    for (let i = 0; i < retryAttempts; i++) {
+        const apiKey = keyManager.getKey();
+        if (!apiKey) {
+            attemptLogs.push(`Attempt ${i + 1}: No available API keys.`);
+            continue;
+        }
+
+        const keyIdentifier = `...${apiKey.slice(-4)}`;
+        logger.log(`Attempt ${i + 1} (Non-Stream): Using key ${keyIdentifier} for model ${model}.`);
+        const requestUrl = new URL(url);
+        requestUrl.searchParams.set("key", apiKey);
+
+        try {
+            const fetchResponse = await fetch(requestUrl.toString(), {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(geminiRequest),
+                signal: signal,
+            });
+
+            if (fetchResponse.ok) {
+                logger.log(`Attempt ${i + 1} (Non-Stream): Request with key ${keyIdentifier} succeeded.`);
+                return await fetchResponse.json();
+            }
+
+            const errorBody = await fetchResponse.text();
+            let errorType = `HTTP ${fetchResponse.status}`;
+            switch (fetchResponse.status) {
+                case 400: errorType = "400 INVALID_ARGUMENT / FAILED_PRECONDITION"; break;
+                case 403: errorType = "403 PERMISSION_DENIED"; break;
+                case 404: errorType = "404 NOT_FOUND"; break;
+                case 429: errorType = "429 RESOURCE_EXHAUSTED"; break;
+                case 500: errorType = "500 INTERNAL_SERVER_ERROR"; break;
+                case 503: errorType = "503 UNAVAILABLE"; break;
+                case 504: errorType = "504 DEADLINE_EXCEEDED"; break;
+            }
+            const errorMessage = `Google API Error: ${errorType} with key ${keyIdentifier}. Body: ${errorBody}`;
+            attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
+            logger.log(`Attempt ${i + 1} FAILED (Non-Stream): ${errorMessage}`, 'ERROR');
+            keyManager.reportFailure(apiKey);
+
+        } catch (error) {
+            if (error.name === 'AbortError') {
+                const errorMessage = `Request aborted with key ${keyIdentifier}. This may be due to client timeout or disconnection.`;
+                attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
+                logger.log(errorMessage, 'INFO');
+            } else {
+                const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
+                attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
+                logger.log(`Attempt ${i + 1} FAILED (Non-Stream): ${errorMessage}`, 'ERROR');
+                keyManager.reportFailure(apiKey);
+            }
+        }
+    }
+    const detailedError = `All ${retryAttempts} API key attempts failed for non-stream request. Logs:\n${attemptLogs.join("\n")}`;
+    logger.log(detailedError, 'CRITICAL');
+    throw new HttpError(detailedError, 500);
+}
+
+
 async function handleChatCompletions(request) {
-    // Create a controller to manage the outbound fetch request
     const controller = new AbortController();
-    
-    // Abort the outbound request if the client disconnects
     request.signal.addEventListener('abort', () => {
         logger.log('Client disconnected, aborting outbound request.', 'INFO');
         controller.abort();
@@ -233,8 +295,45 @@ async function handleChatCompletions(request) {
     const model = openaiRequest.model || "gemini-1.5-flash";
     const geminiRequest = transformRequestToGemini(openaiRequest);
     const stream = openaiRequest.stream || false;
+    const streamMode = openaiRequest.stream_mode || 'auto'; // 'auto', 'fake', 'real'
+    const id = `chatcmpl-${generateId()}`;
+
+    // --- Fake Streaming Logic ---
+    // 默认自动模式下启用假流式，或者当模式明确设置为 'fake' 时
+    if (stream && (streamMode === 'fake' || streamMode === 'auto')) {
+        let keepaliveIntervalId;
+        const readable = new ReadableStream({
+            async start(streamController) {
+                const sendKeepAlive = () => {
+                    try {
+                        streamController.enqueue(': keep-alive\n\n');
+                    } catch (e) {
+                        console.error("Error sending keep-alive:", e);
+                        if (keepaliveIntervalId) clearInterval(keepaliveIntervalId);
+                    }
+                };
+                keepaliveIntervalId = setInterval(sendKeepAlive, 10000);
+
+                try {
+                    const geminiJson = await executeNonStreamRequest(model, geminiRequest, controller.signal);
+                    const bodyObj = processCompletionsResponse(geminiJson, model, id);
+                    streamController.enqueue(sseline(bodyObj));
+                } catch (error) {
+                    console.error("Error in fake streaming execution:", error);
+                    const errorPayload = { error: { message: error.message, type: 'server_error', code: error.status || 500 } };
+                    streamController.enqueue(sseline(errorPayload));
+                } finally {
+                    clearInterval(keepaliveIntervalId);
+                    streamController.enqueue('data: [DONE]\n\n');
+                    streamController.close();
+                }
+            }
+        });
+        return new Response(readable.pipeThrough(new TextEncoderStream()), { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
+    }
+
+    // --- Real Streaming or Non-Streaming Logic ---
     const url = `${BASE_URL}/${API_VERSION}/models/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
-    
     let response;
     const retryAttempts = 5;
     const attemptLogs = [];
@@ -243,9 +342,8 @@ async function handleChatCompletions(request) {
         const apiKey = keyManager.getKey();
         if (!apiKey) {
             attemptLogs.push(`Attempt ${i + 1}: No available API keys.`);
-            break; 
+            break;
         }
-        
         const keyIdentifier = `...${apiKey.slice(-4)}`;
         logger.log(`Attempt ${i + 1}: Using key ${keyIdentifier} for model ${model}.`);
         const requestUrl = new URL(url);
@@ -256,27 +354,36 @@ async function handleChatCompletions(request) {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify(geminiRequest),
-                signal: controller.signal // Pass the abort signal to the fetch request
+                signal: controller.signal
             });
 
             if (fetchResponse.ok) {
                 response = fetchResponse;
                 logger.log(`Attempt ${i + 1}: Request with key ${keyIdentifier} succeeded.`);
-                break; // Success
+                break;
             }
             
             const errorBody = await fetchResponse.text();
-            const errorMessage = `Google API returned status ${fetchResponse.status} with key ${keyIdentifier}. Body: ${errorBody}`;
+            let errorType = `HTTP ${fetchResponse.status}`;
+            switch (fetchResponse.status) {
+                case 400: errorType = "400 INVALID_ARGUMENT / FAILED_PRECONDITION"; break;
+                case 403: errorType = "403 PERMISSION_DENIED"; break;
+                case 404: errorType = "404 NOT_FOUND"; break;
+                case 429: errorType = "429 RESOURCE_EXHAUSTED"; break;
+                case 500: errorType = "500 INTERNAL_SERVER_ERROR"; break;
+                case 503: errorType = "503 UNAVAILABLE"; break;
+                case 504: errorType = "504 DEADLINE_EXCEEDED"; break;
+            }
+            const errorMessage = `Google API Error: ${errorType} with key ${keyIdentifier}. Body: ${errorBody}`;
             attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
             logger.log(`Attempt ${i + 1} FAILED: ${errorMessage}`, 'ERROR');
             keyManager.reportFailure(apiKey);
 
         } catch (error) {
             if (error.name === 'AbortError') {
-                const errorMessage = `Request aborted with key ${keyIdentifier}. This may be due to client timeout or disconnection.`;
+                const errorMessage = `Request aborted with key ${keyIdentifier}.`;
                 attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
                 logger.log(errorMessage, 'INFO');
-                // Do not report failure on client-side aborts
             } else {
                 const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
                 attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
@@ -292,18 +399,9 @@ async function handleChatCompletions(request) {
         throw new HttpError(detailedError, 500);
     }
 
-    const id = `chatcmpl-${generateId()}`;
-
     if (stream) {
-        if (!response.body) {
-            throw new HttpError("Response body is null", 500);
-        }
-
-        const streamState = {
-            buffer: "",
-            firstChunkSent: false,
-        };
-
+        if (!response.body) throw new HttpError("Response body is null", 500);
+        const streamState = { buffer: "", firstChunkSent: false };
         const readable = response.body
             .pipeThrough(new TextDecoderStream())
             .pipeThrough(new TransformStream({
@@ -313,61 +411,36 @@ async function handleChatCompletions(request) {
                     streamState.buffer = lines.pop() || "";
                     for (const line of lines) {
                         if (line.startsWith("data: ")) {
-                            try {
-                                controller.enqueue(JSON.parse(line.substring(6)));
-                            } catch (e) {
-                                console.error("Could not parse stream line:", line);
-                            }
+                            try { controller.enqueue(JSON.parse(line.substring(6))); }
+                            catch (e) { console.error("Could not parse stream line:", line); }
                         }
                     }
                 }
             }))
             .pipeThrough(new TransformStream({
                 transform(geminiChunk, controller) {
-                    if (!geminiChunk.candidates) {
-                        console.error("Invalid stream chunk:", geminiChunk);
-                        return;
-                    }
+                    if (!geminiChunk.candidates) { console.error("Invalid stream chunk:", geminiChunk); return; }
                     const created = Math.floor(Date.now() / 1000);
                     const choice = transformCandidatesDelta(geminiChunk.candidates[0]);
-                    
                     if (!streamState.firstChunkSent) {
-                        controller.enqueue(sseline({
-                            id, created, model, object: "chat.completion.chunk",
-                            choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]
-                        }));
+                        controller.enqueue(sseline({ id, created, model, object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }] }));
                         streamState.firstChunkSent = true;
                     }
-                    
-                    const content = choice.delta.content;
-                    const finish_reason = choice.finish_reason;
-
-                    if (content) {
-                         controller.enqueue(sseline({
-                            id, created, model, object: "chat.completion.chunk",
-                            choices: [{ index: choice.index, delta: { content }, finish_reason: null }]
-                        }));
+                    if (choice.delta.content) {
+                         controller.enqueue(sseline({ id, created, model, object: "chat.completion.chunk", choices: [{ index: choice.index, delta: { content: choice.delta.content }, finish_reason: null }] }));
                     }
-
-                    if (finish_reason) {
-                        controller.enqueue(sseline({
-                            id, created, model, object: "chat.completion.chunk",
-                            choices: [{ index: choice.index, delta: {}, finish_reason: finish_reason }]
-                        }));
+                    if (choice.finish_reason) {
+                        controller.enqueue(sseline({ id, created, model, object: "chat.completion.chunk", choices: [{ index: choice.index, delta: {}, finish_reason: choice.finish_reason }] }));
                     }
                 },
-                flush(controller) {
-                    controller.enqueue("data: [DONE]\n\n");
-                }
+                flush(controller) { controller.enqueue("data: [DONE]\n\n"); }
             }))
             .pipeThrough(new TextEncoderStream());
-        
         return new Response(readable, { headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" } });
-
     } else {
         const geminiJson = await response.json();
-        const body = processCompletionsResponse(geminiJson, model, id);
-        return new Response(body, { headers: { "Content-Type": "application/json" } });
+        const bodyObj = processCompletionsResponse(geminiJson, model, id);
+        return new Response(JSON.stringify(bodyObj), { headers: { "Content-Type": "application/json" } });
     }
 }
 

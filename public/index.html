@@ -71,6 +71,43 @@
         <div id="log-container"></div>
     </div>
 
+    <div class="container">
+        <h2>API 测试</h2>
+        <form id="api-test-form">
+            <div class="input-group">
+                <label for="api-key-input">API Key (可选, 留空则使用内置密钥池):</label>
+                <input type="text" id="api-key-input" placeholder="Enter your API key here...">
+            </div>
+            <div class="input-group">
+                <label for="model-select">选择模型:</label>
+                <select id="model-select" required>
+                    <option value="gemini-1.5-flash-latest">gemini-1.5-flash-latest</option>
+                    <option value="gemini-1.5-pro-latest">gemini-1.5-pro-latest</option>
+                </select>
+            </div>
+            <div class="input-group">
+                <label>流式模式:</label>
+                <div class="radio-group">
+                    <input type="radio" id="stream-auto" name="stream_mode" value="auto" checked>
+                    <label for="stream-auto">自动 (默认假流式)</label>
+                    <input type="radio" id="stream-fake" name="stream_mode" value="fake">
+                    <label for="stream-fake">假流式</label>
+                    <input type="radio" id="stream-real" name="stream_mode" value="real">
+                    <label for="stream-real">真流式</label>
+                </div>
+            </div>
+            <div class="input-group">
+                <label for="user-message">用户消息:</label>
+                <textarea id="user-message" placeholder="Enter your message here..." required></textarea>
+            </div>
+            <button type="submit" id="send-button">发送</button>
+        </form>
+        <div class="response-area">
+            <h3>模型响应:</h3>
+            <pre id="api-response"></pre>
+        </div>
+    </div>
+
     <script>
         const getEl = (id) => document.getElementById(id);
         const apiHost = window.location.origin; // Automatically use the current host
@@ -155,6 +192,91 @@
         fetchData();
         setInterval(fetchData, 3000); // Refresh every 3 seconds
 
+        // --- API Test Form Logic ---
+        const apiTestForm = getEl('api-test-form');
+        const apiKeyInput = getEl('api-key-input');
+        const modelSelect = getEl('model-select');
+        const userMessage = getEl('user-message');
+        const sendButton = getEl('send-button');
+        const apiResponseEl = getEl('api-response');
+
+        apiTestForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            sendButton.disabled = true;
+            apiResponseEl.textContent = 'Waiting for response...';
+
+            const selectedStreamMode = document.querySelector('input[name="stream_mode"]:checked').value;
+
+            const body = {
+                model: modelSelect.value,
+                messages: [{ role: "user", content: userMessage.value }],
+                stream: true, // We always use stream to test all modes
+                stream_mode: selectedStreamMode,
+            };
+
+            const headers = {
+                'Content-Type': 'application/json',
+            };
+            
+            const customApiKey = apiKeyInput.value.trim();
+            if (customApiKey) {
+                headers['Authorization'] = `Bearer ${customApiKey}`;
+            }
+
+
+            try {
+                const response = await fetch(`${apiHost}/v1/chat/completions`, {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify(body)
+                });
+
+                apiResponseEl.textContent = '';
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunk = decoder.decode(value, { stream: true });
+                    const lines = chunk.split('\n\n');
+
+                    for (const line of lines) {
+                        if (line.startsWith('data: ')) {
+                            const dataContent = line.substring(6);
+                            if (dataContent.trim() === '[DONE]') {
+                                break;
+                            }
+                            try {
+                                const parsed = JSON.parse(dataContent);
+                                if (parsed.choices && parsed.choices[0].delta && parsed.choices[0].delta.content) {
+                                    apiResponseEl.textContent += parsed.choices[0].delta.content;
+                                } else if (parsed.choices && parsed.choices[0].message) { // For fake stream
+                                    apiResponseEl.textContent = parsed.choices[0].message.content;
+                                }
+                            } catch (err) {
+                                // This might be the fake stream's single JSON object
+                                try {
+                                    const parsed = JSON.parse(line);
+                                     if (parsed.choices && parsed.choices[0].message) {
+                                        apiResponseEl.textContent = parsed.choices[0].message.content;
+                                     }
+                                } catch (e) {
+                                    console.error("Error parsing line:", line, e);
+                                }
+                            }
+                        }
+                    }
+                }
+
+            } catch (error) {
+                apiResponseEl.textContent = `Error: ${error.message}`;
+                console.error('API Test Error:', error);
+            } finally {
+                sendButton.disabled = false;
+            }
+        });
     </script>
 </body>
 </html>
