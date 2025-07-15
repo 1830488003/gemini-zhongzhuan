@@ -213,18 +213,48 @@
         const apiResponseEl = getEl('api-response');
         const fakeStreamToggle = getEl('fake-stream-toggle');
 
+        // --- Global Settings Sync ---
+        async function syncSettings() {
+            try {
+                const response = await fetch(`${apiHost}/v1/diag/config`);
+                if (response.ok) {
+                    const settings = await response.json();
+                    fakeStreamToggle.checked = settings.force_fake_stream;
+                }
+            } catch (e) {
+                console.error("Failed to sync global settings:", e);
+            }
+        }
+
+        fakeStreamToggle.addEventListener('change', async () => {
+            const newValue = fakeStreamToggle.checked;
+            try {
+                await fetch(`${apiHost}/v1/diag/config`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ force_fake_stream: newValue })
+                });
+            } catch (e) {
+                console.error("Failed to update global settings:", e);
+                // Revert UI on failure
+                fakeStreamToggle.checked = !newValue;
+            }
+        });
+        
+        // Initial sync on page load
+        syncSettings();
+
+
         apiTestForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             sendButton.disabled = true;
             apiResponseEl.textContent = 'Waiting for response...';
 
-            const useFakeStream = fakeStreamToggle.checked;
-
+            // The body no longer needs to send stream_mode, as the server handles it globally.
             const body = {
                 model: modelSelect.value,
                 messages: [{ role: "user", content: userMessage.value }],
-                stream: true, // We always use stream to test all modes
-                stream_mode: useFakeStream ? 'fake' : 'real',
+                stream: true, 
             };
 
             const headers = {
