@@ -407,45 +407,8 @@ async function handleChatCompletions(request, logStore) {
 
           const bodyObj = processCompletionsResponse(geminiJson, model, id);
 
-          // Now, emulate a real stream by sending the full response as correctly formatted chunks.
-          const created = bodyObj.created;
-
-          // 1. Send an initial chunk with role and empty content.
-          streamController.enqueue(
-            sseline({
-              id,
-              created,
-              model,
-              object: 'chat.completion.chunk',
-              choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-            }),
-          );
-
-          // 2. Send the entire content in a single chunk.
-          const content = bodyObj.choices[0]?.message?.content;
-          if (content) {
-            streamController.enqueue(
-              sseline({
-                id,
-                created,
-                model,
-                object: 'chat.completion.chunk',
-                choices: [{ index: 0, delta: { content: content }, finish_reason: null }],
-              }),
-            );
-          }
-
-          // 3. Send the final chunk with the finish reason.
-          const finish_reason = bodyObj.choices[0]?.finish_reason || 'stop';
-          streamController.enqueue(
-            sseline({
-              id,
-              created,
-              model,
-              object: 'chat.completion.chunk',
-              choices: [{ index: 0, delta: {}, finish_reason: finish_reason }],
-            }),
-          );
+          // 根据用户要求，在假流式传输中，将完整的非流式对象作为单个数据事件发送。
+          streamController.enqueue(sseline(bodyObj));
         } catch (error) {
           console.error('Error in fake streaming execution:', error);
           const errorPayload = { error: { message: error.message, type: 'server_error', code: error.status || 500 } };
