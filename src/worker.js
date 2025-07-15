@@ -1,4 +1,6 @@
 // @ts-check
+// @ts-ignore
+import { getStore } from 'netlify:blob';
 
 /**
  * Final Architecture: Replicating hajimi-main's KeyManager and ActiveRequestManager patterns.
@@ -120,21 +122,38 @@ let globalSettings = { force_fake_stream: true };
 
 class GlobalLogger {
   constructor(maxSize = 100) {
-    this.logs = [];
     this.maxSize = maxSize;
   }
 
-  log(message, type = 'INFO') {
-    const timestamp = new Date().toISOString();
-    const logEntry = { timestamp, type, message };
-    this.logs.unshift(logEntry); // Add to the beginning
-    if (this.logs.length > this.maxSize) {
-      this.logs.pop(); // Remove the oldest
+  async log(store, message, type = 'INFO') {
+    if (!store) {
+      console.log(`(No-Store) [${type}] ${message}`);
+      return;
+    }
+    try {
+      const timestamp = new Date().toISOString();
+      const logEntry = { timestamp, type, message };
+
+      const currentLogs = (await store.get('latest_logs', { type: 'json' })) || [];
+      currentLogs.unshift(logEntry);
+
+      if (currentLogs.length > this.maxSize) {
+        currentLogs.splice(this.maxSize);
+      }
+      await store.setJSON('latest_logs', currentLogs);
+    } catch (e) {
+      console.error('Blob Store Write Error:', e);
     }
   }
 
-  getLogs() {
-    return this.logs;
+  async getLogs(store) {
+    if (!store) return [];
+    try {
+      return (await store.get('latest_logs', { type: 'json' })) || [];
+    } catch (e) {
+      console.error('Blob Store Read Error:', e);
+      return [];
+    }
   }
 }
 const logger = new GlobalLogger();
@@ -255,7 +274,7 @@ const processCompletionsResponse = (data, model, id) => {
 
 const sseline = obj => `data: ${JSON.stringify(obj)}\n\n`;
 
-async function executeNonStreamRequest(model, geminiRequest, signal) {
+async function executeNonStreamRequest(model, geminiRequest, signal, logStore) {
   const url = `${BASE_URL}/${API_VERSION}/models/${model}:generateContent`;
   const retryAttempts = 5;
   const attemptLogs = [];
@@ -268,7 +287,7 @@ async function executeNonStreamRequest(model, geminiRequest, signal) {
     }
 
     const keyIdentifier = `...${apiKey.slice(-4)}`;
-    logger.log(`第 ${i + 1} 次尝试 (非流式): 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
+    await logger.log(logStore, `第 ${i + 1} 次尝试 (非流式): 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
     const requestUrl = new URL(url);
     requestUrl.searchParams.set('key', apiKey);
 
@@ -280,10 +299,10 @@ async function executeNonStreamRequest(model, geminiRequest, signal) {
         signal: signal,
       });
 
-            if (fetchResponse.ok) {
-                logger.log(`第 ${i + 1} 次尝试 (非流式): 密钥 ${keyIdentifier} 请求成功。`);
-                return await fetchResponse.json();
-            }
+      if (fetchResponse.ok) {
+        await logger.log(logStore, `第 ${i + 1} 次尝试 (非流式): 密钥 ${keyIdentifier} 请求成功。`);
+        return await fetchResponse.json();
+      }
 
       const errorBody = await fetchResponse.text();
       let errorType = `HTTP ${fetchResponse.status}`;
@@ -310,34 +329,34 @@ async function executeNonStreamRequest(model, geminiRequest, signal) {
           errorType = '504 DEADLINE_EXCEEDED';
           break;
       }
-            const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
-            attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-            logger.log(`第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
+      const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
+      attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+      await logger.log(logStore, `第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
       keyManager.reportFailure(apiKey);
     } catch (error) {
-            if (error.name === 'AbortError') {
-                const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。可能原因：客户端超时或断开连接。`;
-                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-                logger.log(errorMessage, 'INFO');
-            } else {
-                const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
-                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-                logger.log(`第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
-                keyManager.reportFailure(apiKey);
-            }
+      if (error.name === 'AbortError') {
+        const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。可能原因：客户端超时或断开连接。`;
+        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+        await logger.log(logStore, errorMessage, 'INFO');
+      } else {
+        const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
+        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+        await logger.log(logStore, `第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
+        keyManager.reportFailure(apiKey);
+      }
     }
   }
   const detailedError = `All ${retryAttempts} API key attempts failed for non-stream request. Logs:\n${attemptLogs.join(
     '\n',
   )}`;
-  logger.log(detailedError, 'CRITICAL');
+  await logger.log(logStore, detailedError, 'CRITICAL');
   throw new HttpError(detailedError, 500);
 }
 
-async function handleChatCompletions(request) {
+async function handleChatCompletions(request, logStore) {
   const controller = new AbortController();
   request.signal.addEventListener('abort', () => {
-    logger.log('客户端连接已断开，正在中止外部请求。', 'INFO');
+    logger.log(logStore, '客户端连接已断开，正在中止外部请求。', 'INFO');
     controller.abort();
   });
 
@@ -348,10 +367,10 @@ async function handleChatCompletions(request) {
   let streamMode = openaiRequest.stream_mode || 'real';
   const id = `chatcmpl-${generateId()}`;
 
-    // --- Global Fake Stream Override ---
+  // --- Global Fake Stream Override ---
   if (globalSettings.force_fake_stream && stream) {
     streamMode = 'fake';
-    logger.log('全局设置: 强制使用“假流式”模式。', 'INFO');
+    await logger.log(logStore, '全局设置: 强制使用“假流式”模式。', 'INFO');
   }
 
   // --- Fake Streaming Logic ---
@@ -374,7 +393,7 @@ async function handleChatCompletions(request) {
         keepaliveIntervalId = setInterval(sendKeepAlive, 10000);
 
         try {
-          const geminiJson = await executeNonStreamRequest(model, geminiRequest, controller.signal);
+          const geminiJson = await executeNonStreamRequest(model, geminiRequest, controller.signal, logStore);
           const bodyObj = processCompletionsResponse(geminiJson, model, id);
           streamController.enqueue(sseline(bodyObj));
         } catch (error) {
@@ -409,7 +428,7 @@ async function handleChatCompletions(request) {
       break;
     }
     const keyIdentifier = `...${apiKey.slice(-4)}`;
-    logger.log(`第 ${i + 1} 次尝试: 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
+    await logger.log(logStore, `第 ${i + 1} 次尝试: 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
     const requestUrl = new URL(url);
     requestUrl.searchParams.set('key', apiKey);
 
@@ -421,11 +440,11 @@ async function handleChatCompletions(request) {
         signal: controller.signal,
       });
 
-            if (fetchResponse.ok) {
-                response = fetchResponse;
-                logger.log(`第 ${i + 1} 次尝试: 密钥 ${keyIdentifier} 请求成功。`);
-                break;
-            }
+      if (fetchResponse.ok) {
+        response = fetchResponse;
+        await logger.log(logStore, `第 ${i + 1} 次尝试: 密钥 ${keyIdentifier} 请求成功。`);
+        break;
+      }
 
       const errorBody = await fetchResponse.text();
       let errorType = `HTTP ${fetchResponse.status}`;
@@ -452,29 +471,29 @@ async function handleChatCompletions(request) {
           errorType = '504 DEADLINE_EXCEEDED';
           break;
       }
-            const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
-            attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-            logger.log(`第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
+      const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
+      attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+      await logger.log(logStore, `第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
       keyManager.reportFailure(apiKey);
     } catch (error) {
-            if (error.name === 'AbortError') {
-                const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。`;
-                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-                logger.log(errorMessage, 'INFO');
-            } else {
-                const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
-                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-                logger.log(`第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
-                keyManager.reportFailure(apiKey);
-            }
+      if (error.name === 'AbortError') {
+        const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。`;
+        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+        await logger.log(logStore, errorMessage, 'INFO');
+      } else {
+        const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
+        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+        await logger.log(logStore, `第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
+        keyManager.reportFailure(apiKey);
+      }
     }
   }
 
-    if (!response) {
-        const detailedError = `所有 ${retryAttempts} 次API密钥尝试均失败。日志:\n${attemptLogs.join('\n')}`;
-        logger.log(detailedError, 'CRITICAL');
-        throw new HttpError(detailedError, 500);
-    }
+  if (!response) {
+    const detailedError = `所有 ${retryAttempts} 次API密钥尝试均失败。日志:\n${attemptLogs.join('\n')}`;
+    await logger.log(logStore, detailedError, 'CRITICAL');
+    throw new HttpError(detailedError, 500);
+  }
 
   if (useStreamEndpoint) {
     if (!response.body) throw new HttpError('Response body is null', 500);
@@ -595,11 +614,13 @@ async function handleModels() {
 }
 
 /**
- * Handles requests for the diagnostic status.
- * @returns {Response}
+ * Handles requests for the diagnostic logs.
+ * @param {any} store The blob store for logs.
+ * @returns {Promise<Response>}
  */
-function handleDiagLogs() {
-  return new Response(JSON.stringify(logger.getLogs()), { headers: { 'Content-Type': 'application/json' } });
+async function handleDiagLogs(store) {
+  const logs = await logger.getLogs(store);
+  return new Response(JSON.stringify(logs), { headers: { 'Content-Type': 'application/json' } });
 }
 
 function handleDiagStatus() {
@@ -629,13 +650,13 @@ function handleDiagStatus() {
   });
 }
 
-async function handleDiagConfig(request) {
+async function handleDiagConfig(request, logStore) {
   if (request.method === 'POST') {
     try {
       const body = await request.json();
       if (typeof body.force_fake_stream === 'boolean') {
         globalSettings.force_fake_stream = body.force_fake_stream;
-                logger.log(`全局设置“强制假流式”已更新为: ${globalSettings.force_fake_stream}`, 'SUCCESS');
+        await logger.log(logStore, `全局设置“强制假流式”已更新为: ${globalSettings.force_fake_stream}`, 'SUCCESS');
         return new Response(JSON.stringify({ success: true, settings: globalSettings }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
@@ -663,13 +684,21 @@ async function handleDiagConfig(request) {
 
 // --- Main Entry Point ---
 
-async function handleRequest(request, env) {
+/**
+ * @param {Request} request
+ * @param {import('@netlify/edge-functions').Context} context
+ * @returns {Promise<Response>}
+ */
+async function handleRequest(request, context) {
   const addCors = response => {
     response.headers.set('Access-Control-Allow-Origin', '*');
     response.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
     response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
     return response;
   };
+
+  // @ts-ignore
+  const logStore = context.blobs ? getStore(context, 'global-logs') : null;
 
   try {
     if (request.method === 'OPTIONS') {
@@ -687,7 +716,7 @@ async function handleRequest(request, env) {
 
     const { pathname } = new URL(request.url);
     if (pathname.endsWith('/chat/completions')) {
-      const response = await handleChatCompletions(request);
+      const response = await handleChatCompletions(request, logStore);
       return addCors(response);
     }
 
@@ -702,12 +731,12 @@ async function handleRequest(request, env) {
     }
 
     if (pathname.endsWith('/v1/diag/logs')) {
-      const response = handleDiagLogs();
+      const response = await handleDiagLogs(logStore);
       return addCors(response);
     }
 
     if (pathname.endsWith('/v1/diag/config')) {
-      const response = await handleDiagConfig(request);
+      const response = await handleDiagConfig(request, logStore);
       return addCors(response);
     }
 
@@ -716,6 +745,9 @@ async function handleRequest(request, env) {
     console.error('Unhandled error in handleRequest:', error);
     const status = error instanceof HttpError ? error.status : 500;
     const message = error instanceof Error ? error.message : 'An unknown error occurred.';
+    if (logStore) {
+      await logger.log(logStore, `Request failed with unhandled error: ${message}`, 'CRITICAL');
+    }
     const errorResponse = new Response(JSON.stringify({ error: { message, type: 'server_error' } }), {
       status,
       headers: { 'Content-Type': 'application/json' },

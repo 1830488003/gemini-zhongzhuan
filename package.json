@@ -1,5 +1,6 @@
 {
   "devDependencies": {
+    "@netlify/edge-functions": "^2.15.6",
     "wrangler": "^4.23.0"
   }
 }
