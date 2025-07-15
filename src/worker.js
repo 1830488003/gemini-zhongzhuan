@@ -441,32 +441,47 @@ function createStreamTransformer(inputStream, id, model, streamIncludeUsage) {
         const cand = obj.choices[0];
         if (!cand) return;
 
-        const finish_reason = cand.finish_reason;
-        cand.finish_reason = null;
-
+        // Handle initial role chunk
         if (!last[cand.index]) {
             controller.enqueue(sseline({ ...obj, choices: [{ ...cand, delta: { role: "assistant", content: "" } }] }));
+            last[cand.index] = true; // Mark as sent
         }
         
-        if (cand.delta) {
-            delete cand.delta.role;
-            if ("content" in cand.delta) {
-                controller.enqueue(sseline(obj));
-            }
+        // Handle content chunk
+        if (cand.delta && cand.delta.content) {
+            const contentChunk = {
+                ...obj,
+                choices: [{ ...cand, finish_reason: null }] // Ensure finish_reason is not in content chunk
+            };
+            delete contentChunk.choices[0].delta.role;
+            controller.enqueue(sseline(contentChunk));
         }
 
-        cand.finish_reason = finish_reason;
-        if (data.usageMetadata && streamIncludeUsage) {
-            obj.usage = transformUsage(data.usageMetadata);
+        // Handle final chunk with finish_reason
+        if (cand.finish_reason) {
+            const finalChunk = {
+                ...obj,
+                choices: [{
+                    index: cand.index,
+                    delta: {}, // Delta must be empty
+                    logprobs: null,
+                    finish_reason: cand.finish_reason,
+                }],
+                // Conditionally add usage property to satisfy TypeScript
+                ...(data.usageMetadata && streamIncludeUsage ? { usage: transformUsage(data.usageMetadata) } : {})
+            };
+            // This final chunk will be sent by the flush function
+            last[cand.index] = finalChunk;
         }
-        cand.delta = {};
-        last[cand.index] = obj;
     }
 
     function toOpenAiStreamFlush(controller) {
         if (last.length > 0) {
-            for (const obj of last) {
-                if (obj) controller.enqueue(sseline(obj));
+            for (const finalChunk of last) {
+                // Only send if it's an actual object, not the `true` placeholder
+                if (finalChunk && typeof finalChunk === 'object') {
+                    controller.enqueue(sseline(finalChunk));
+                }
             }
         }
         controller.enqueue(`data: [DONE]${delimiter}`);
