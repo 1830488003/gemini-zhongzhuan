@@ -377,36 +377,47 @@ async function handleChatCompletions(request, logStore) {
   if (stream && streamMode === 'fake') {
     const readable = new ReadableStream({
       async start(streamController) {
-        // Immediately send a keep-alive comment to establish the connection
-        // and prevent the client from timing out while we wait for the full response.
-        streamController.enqueue(': connection established\n\n');
-
         let keepaliveIntervalId;
+
+        // Start sending standards-compliant keep-alive chunks immediately.
+        // This prevents client timeouts while we wait for the full response.
         const sendKeepAlive = () => {
           try {
-            streamController.enqueue(': keep-alive\n\n');
+            const keepAliveChunk = {
+              id,
+              created: Math.floor(Date.now() / 1000),
+              model,
+              object: 'chat.completion.chunk',
+              choices: [{ index: 0, delta: { content: '' }, finish_reason: null }],
+            };
+            streamController.enqueue(sseline(keepAliveChunk));
           } catch (e) {
-            console.error('Error sending keep-alive:', e);
+            console.error('Error sending keep-alive chunk:', e);
             if (keepaliveIntervalId) clearInterval(keepaliveIntervalId);
           }
         };
-        keepaliveIntervalId = setInterval(sendKeepAlive, 10000);
+        keepaliveIntervalId = setInterval(sendKeepAlive, 8000); // Send every 8 seconds
 
         try {
+          // Wait for the full response from the non-streaming endpoint.
           const geminiJson = await executeNonStreamRequest(model, geminiRequest, controller.signal, logStore);
+          
+          // Stop the keep-alive signal once we have the data.
+          clearInterval(keepaliveIntervalId);
+
           const bodyObj = processCompletionsResponse(geminiJson, model, id);
 
-          // Emulate a real stream by sending the full response as correctly formatted chunks.
-          const created = bodyObj.created; // Use the original creation time for consistency.
+          // Now, emulate a real stream by sending the full response as correctly formatted chunks.
+          const created = bodyObj.created;
 
-          // 1. Send an initial chunk to establish the role.
+          // 1. Send an initial chunk with role and empty content.
           streamController.enqueue(
             sseline({
               id,
               created,
               model,
               object: 'chat.completion.chunk',
-              choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+              choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
             }),
           );
 
@@ -424,7 +435,7 @@ async function handleChatCompletions(request, logStore) {
             );
           }
 
-          // 3. Send the final chunk with the finish reason and usage stats.
+          // 3. Send the final chunk with the finish reason.
           const finish_reason = bodyObj.choices[0]?.finish_reason || 'stop';
           streamController.enqueue(
             sseline({
@@ -433,7 +444,6 @@ async function handleChatCompletions(request, logStore) {
               model,
               object: 'chat.completion.chunk',
               choices: [{ index: 0, delta: {}, finish_reason: finish_reason }],
-              usage: bodyObj.usage, // Include usage stats in the final chunk.
             }),
           );
         } catch (error) {
@@ -441,7 +451,8 @@ async function handleChatCompletions(request, logStore) {
           const errorPayload = { error: { message: error.message, type: 'server_error', code: error.status || 500 } };
           streamController.enqueue(sseline(errorPayload));
         } finally {
-          clearInterval(keepaliveIntervalId);
+          if (keepaliveIntervalId) clearInterval(keepaliveIntervalId);
+          // Always close the stream with a [DONE] message.
           streamController.enqueue('data: [DONE]\n\n');
           streamController.close();
         }
