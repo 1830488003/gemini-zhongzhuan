@@ -9,7 +9,6 @@
 const CUSTOM_AUTH_KEY = "67564534";
 const BASE_URL = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
-const FAKE_STREAMING_ENABLED = true; // 移植自 hajimi-main 的假流式功能开关
 // --- End Configuration ---
 
 class HttpError extends Error {
@@ -215,102 +214,10 @@ const processCompletionsResponse = (data, model, id) => {
   if (obj.choices.length === 0 ) {
     checkPromptBlock(obj.choices, data.promptFeedback, "message");
   }
-  return obj; // 返回对象而不是字符串
+  return JSON.stringify(obj);
 };
 
 const sseline = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
-
-async function handleFakeStreaming(request, model, geminiRequest) {
-    const id = `chatcmpl-${generateId()}`;
-    let keepaliveIntervalId;
-
-    const readable = new ReadableStream({
-        async start(controller) {
-            const sendKeepAlive = () => {
-                try {
-                    controller.enqueue(': keep-alive\n\n');
-                } catch (e) {
-                    console.error("Error sending keep-alive:", e);
-                    if (keepaliveIntervalId) clearInterval(keepaliveIntervalId);
-                }
-            };
-            
-            keepaliveIntervalId = setInterval(sendKeepAlive, 10000);
-
-            try {
-                const url = `${BASE_URL}/${API_VERSION}/models/${model}:generateContent`;
-                let fetchResponse;
-                const retryAttempts = 5;
-                const attemptLogs = [];
-
-                for (let i = 0; i < retryAttempts; i++) {
-                    const apiKey = keyManager.getKey();
-                    if (!apiKey) {
-                        attemptLogs.push(`Attempt ${i + 1}: No available API keys.`);
-                        break;
-                    }
-                    const keyIdentifier = `...${apiKey.slice(-4)}`;
-                    const requestUrl = new URL(url);
-                    requestUrl.searchParams.set("key", apiKey);
-
-                    try {
-                        const response = await fetch(requestUrl.toString(), {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify(geminiRequest),
-                        });
-
-                        if (response.ok) {
-                            fetchResponse = response;
-                            break;
-                        }
-                        const errorBody = await response.text();
-                        const errorMessage = `Google API returned status ${response.status} with key ${keyIdentifier}. Body: ${errorBody}`;
-                        attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-                        keyManager.reportFailure(apiKey);
-                    } catch (error) {
-                        const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
-                        attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-                        keyManager.reportFailure(apiKey);
-                    }
-                }
-
-                if (!fetchResponse) {
-                    throw new HttpError(`All ${retryAttempts} API key attempts failed. Logs:\n${attemptLogs.join("\n")}`, 500);
-                }
-
-                const geminiJson = await fetchResponse.json();
-                const bodyObj = processCompletionsResponse(geminiJson, model, id);
-                
-                controller.enqueue(`data: ${JSON.stringify(bodyObj)}\n\n`);
-                controller.enqueue('data: [DONE]\n\n');
-
-            } catch (error) {
-                console.error("Error in fake streaming:", error);
-                const errorPayload = {
-                    error: {
-                        message: error.message,
-                        type: 'server_error',
-                        code: error.status || 500,
-                    }
-                };
-                controller.enqueue(`data: ${JSON.stringify(errorPayload)}\n\n`);
-                controller.enqueue('data: [DONE]\n\n');
-            } finally {
-                if (keepaliveIntervalId) clearInterval(keepaliveIntervalId);
-                controller.close();
-            }
-        }
-    });
-
-    return new Response(readable, {
-        headers: {
-            "Content-Type": "text/event-stream",
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-        }
-    });
-}
 
 async function handleChatCompletions(request) {
     // Create a controller to manage the outbound fetch request
@@ -326,11 +233,6 @@ async function handleChatCompletions(request) {
     const model = openaiRequest.model || "gemini-1.5-flash";
     const geminiRequest = transformRequestToGemini(openaiRequest);
     const stream = openaiRequest.stream || false;
-
-    if (stream && FAKE_STREAMING_ENABLED) {
-        return handleFakeStreaming(request, model, geminiRequest);
-    }
-
     const url = `${BASE_URL}/${API_VERSION}/models/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
     
     let response;
@@ -464,8 +366,8 @@ async function handleChatCompletions(request) {
 
     } else {
         const geminiJson = await response.json();
-        const bodyObj = processCompletionsResponse(geminiJson, model, id);
-        return new Response(JSON.stringify(bodyObj), { headers: { "Content-Type": "application/json" } });
+        const body = processCompletionsResponse(geminiJson, model, id);
+        return new Response(body, { headers: { "Content-Type": "application/json" } });
     }
 }
 
