@@ -35,6 +35,18 @@
         .log-type-CRITICAL { color: #ff4d4d; font-weight: bold; background-color: #5c0000; }
         .log-type-SUCCESS { color: #8aff8a; }
 
+        /* Form & Input Styles */
+        .input-group { margin-bottom: 15px; }
+        .input-group label { display: block; margin-bottom: 5px; font-weight: bold; color: #495057; }
+        .input-group input[type="text"], .input-group select, .input-group textarea { width: 100%; padding: 10px; border: 1px solid #ced4da; border-radius: 4px; box-sizing: border-box; }
+        #send-button { background-color: #007bff; color: white; padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; font-size: 1em; }
+        #send-button:disabled { background-color: #6c757d; }
+        .input-group input[type="checkbox"] { width: auto; margin-right: 8px; vertical-align: middle; }
+        .input-group small { vertical-align: middle; color: #6c757d; }
+        .response-area { margin-top: 20px; }
+        .response-area h3 { margin-bottom: 10px; }
+        #api-response { background-color: #e9ecef; padding: 15px; border-radius: 4px; min-height: 100px; white-space: pre-wrap; word-wrap: break-word; }
+
     </style>
 </head>
 <body>
@@ -73,6 +85,13 @@
 
     <div class="container">
         <h2>API 测试</h2>
+        <div class="input-group">
+            <label for="fake-stream-toggle">启用假流式 (全局):</label>
+            <div>
+                <input type="checkbox" id="fake-stream-toggle" checked>
+                <small>打开后, 所有来自客户端的流式请求都将强制使用“假流式”模式。</small>
+            </div>
+        </div>
         <form id="api-test-form">
             <div class="input-group">
                 <label for="api-key-input">API Key (可选, 留空则使用内置密钥池):</label>
@@ -81,24 +100,17 @@
             <div class="input-group">
                 <label for="model-select">选择模型:</label>
                 <select id="model-select" required>
-                    <option value="gemini-1.5-flash-latest">gemini-1.5-flash-latest</option>
-                    <option value="gemini-1.5-pro-latest">gemini-1.5-pro-latest</option>
+                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                    <option value="gemini-2.5-flash-preview-04-17-thinking">gemini-2.5-flash-preview-04-17-thinking</option>
+                    <option value="gemini-2.5-flash-lite-preview-06-17">gemini-2.5-flash-lite-preview-06-17</option>
+                    <option value="gemini-2.5-pro-preview-05-06">gemini-2.5-pro-preview-05-06</option>
+                    <option value="gemini-2.5-pro-preview-06-05">gemini-2.5-pro-preview-06-05</option>
+                    <option value="gemini-2.5-pro" selected>gemini-2.5-pro</option>
                 </select>
             </div>
             <div class="input-group">
-                <label>流式模式:</label>
-                <div class="radio-group">
-                    <input type="radio" id="stream-auto" name="stream_mode" value="auto" checked>
-                    <label for="stream-auto">自动 (默认假流式)</label>
-                    <input type="radio" id="stream-fake" name="stream_mode" value="fake">
-                    <label for="stream-fake">假流式</label>
-                    <input type="radio" id="stream-real" name="stream_mode" value="real">
-                    <label for="stream-real">真流式</label>
-                </div>
-            </div>
-            <div class="input-group">
                 <label for="user-message">用户消息:</label>
-                <textarea id="user-message" placeholder="Enter your message here..." required></textarea>
+                <textarea id="user-message" placeholder="Enter your message here..." required>你好</textarea>
             </div>
             <button type="submit" id="send-button">发送</button>
         </form>
@@ -199,19 +211,20 @@
         const userMessage = getEl('user-message');
         const sendButton = getEl('send-button');
         const apiResponseEl = getEl('api-response');
+        const fakeStreamToggle = getEl('fake-stream-toggle');
 
         apiTestForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             sendButton.disabled = true;
             apiResponseEl.textContent = 'Waiting for response...';
 
-            const selectedStreamMode = document.querySelector('input[name="stream_mode"]:checked').value;
+            const useFakeStream = fakeStreamToggle.checked;
 
             const body = {
                 model: modelSelect.value,
                 messages: [{ role: "user", content: userMessage.value }],
                 stream: true, // We always use stream to test all modes
-                stream_mode: selectedStreamMode,
+                stream_mode: useFakeStream ? 'fake' : 'real',
             };
 
             const headers = {

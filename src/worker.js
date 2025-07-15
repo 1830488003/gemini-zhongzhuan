@@ -295,13 +295,13 @@ async function handleChatCompletions(request) {
     const model = openaiRequest.model || "gemini-1.5-flash";
     const geminiRequest = transformRequestToGemini(openaiRequest);
     const stream = openaiRequest.stream || false;
-    const streamMode = openaiRequest.stream_mode || 'auto'; // 'auto', 'fake', 'real'
+    // The new logic: stream_mode is now a simple boolean from the client toggle.
+    // 'fake' means use fake streaming, 'real' means use real streaming.
+    const streamMode = openaiRequest.stream_mode || 'real'; 
     const id = `chatcmpl-${generateId()}`;
 
     // --- Fake Streaming Logic ---
-    // 默认自动模式下启用假流式，或者当模式明确设置为 'fake' 时
-    if (stream && (streamMode === 'fake' || streamMode === 'auto')) {
-        let keepaliveIntervalId;
+    if (stream && streamMode === 'fake') {
         const readable = new ReadableStream({
             async start(streamController) {
                 // Immediately send a keep-alive comment to establish the connection
@@ -338,7 +338,8 @@ async function handleChatCompletions(request) {
     }
 
     // --- Real Streaming or Non-Streaming Logic ---
-    const url = `${BASE_URL}/${API_VERSION}/models/${model}:${stream ? "streamGenerateContent?alt=sse" : "generateContent"}`;
+    const useStreamEndpoint = stream && streamMode === 'real';
+    const url = `${BASE_URL}/${API_VERSION}/models/${model}:${useStreamEndpoint ? "streamGenerateContent?alt=sse" : "generateContent"}`;
     let response;
     const retryAttempts = 5;
     const attemptLogs = [];
@@ -404,7 +405,7 @@ async function handleChatCompletions(request) {
         throw new HttpError(detailedError, 500);
     }
 
-    if (stream) {
+    if (useStreamEndpoint) {
         if (!response.body) throw new HttpError("Response body is null", 500);
         const streamState = { buffer: "", firstChunkSent: false };
         const readable = response.body
