@@ -5,5 +5,5 @@ main = "src/index.js"
 compatibility_date = "2025-06-17"
 compatibility_flags = ["nodejs_compat"]
 
-[site]
-bucket = "./public"
+[assets]
+directory = "./public"
