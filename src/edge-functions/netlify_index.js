@@ -7,5 +7,5 @@ export default (request, context) => {
 };
 
 export const config = {
-  path: "/v1/*"
+  path: "/*"
 };

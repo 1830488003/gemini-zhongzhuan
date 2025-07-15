@@ -107,7 +107,7 @@ class KeyManager {
   reportFailure(key) {
     if (key) {
       this.failedKeys.set(key, Date.now());
-      console.warn(`KeyManager: Reported failure for key ...${key.slice(-4)}. Cooldown started.`);
+      console.warn(`密钥管理器: 报告密钥 ...${key.slice(-4)} 失效，冷却期开始。`);
     }
   }
 }
@@ -268,7 +268,7 @@ async function executeNonStreamRequest(model, geminiRequest, signal) {
     }
 
     const keyIdentifier = `...${apiKey.slice(-4)}`;
-    logger.log(`Attempt ${i + 1} (Non-Stream): Using key ${keyIdentifier} for model ${model}.`);
+    logger.log(`第 ${i + 1} 次尝试 (非流式): 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
     const requestUrl = new URL(url);
     requestUrl.searchParams.set('key', apiKey);
 
@@ -280,10 +280,10 @@ async function executeNonStreamRequest(model, geminiRequest, signal) {
         signal: signal,
       });
 
-      if (fetchResponse.ok) {
-        logger.log(`Attempt ${i + 1} (Non-Stream): Request with key ${keyIdentifier} succeeded.`);
-        return await fetchResponse.json();
-      }
+            if (fetchResponse.ok) {
+                logger.log(`第 ${i + 1} 次尝试 (非流式): 密钥 ${keyIdentifier} 请求成功。`);
+                return await fetchResponse.json();
+            }
 
       const errorBody = await fetchResponse.text();
       let errorType = `HTTP ${fetchResponse.status}`;
@@ -310,21 +310,21 @@ async function executeNonStreamRequest(model, geminiRequest, signal) {
           errorType = '504 DEADLINE_EXCEEDED';
           break;
       }
-      const errorMessage = `Google API Error: ${errorType} with key ${keyIdentifier}. Body: ${errorBody}`;
-      attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-      logger.log(`Attempt ${i + 1} FAILED (Non-Stream): ${errorMessage}`, 'ERROR');
+            const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
+            attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+            logger.log(`第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
       keyManager.reportFailure(apiKey);
     } catch (error) {
-      if (error.name === 'AbortError') {
-        const errorMessage = `Request aborted with key ${keyIdentifier}. This may be due to client timeout or disconnection.`;
-        attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-        logger.log(errorMessage, 'INFO');
-      } else {
-        const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
-        attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-        logger.log(`Attempt ${i + 1} FAILED (Non-Stream): ${errorMessage}`, 'ERROR');
-        keyManager.reportFailure(apiKey);
-      }
+            if (error.name === 'AbortError') {
+                const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。可能原因：客户端超时或断开连接。`;
+                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+                logger.log(errorMessage, 'INFO');
+            } else {
+                const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
+                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+                logger.log(`第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
+                keyManager.reportFailure(apiKey);
+            }
     }
   }
   const detailedError = `All ${retryAttempts} API key attempts failed for non-stream request. Logs:\n${attemptLogs.join(
@@ -337,7 +337,7 @@ async function executeNonStreamRequest(model, geminiRequest, signal) {
 async function handleChatCompletions(request) {
   const controller = new AbortController();
   request.signal.addEventListener('abort', () => {
-    logger.log('Client disconnected, aborting outbound request.', 'INFO');
+    logger.log('客户端连接已断开，正在中止外部请求。', 'INFO');
     controller.abort();
   });
 
@@ -348,10 +348,10 @@ async function handleChatCompletions(request) {
   let streamMode = openaiRequest.stream_mode || 'real';
   const id = `chatcmpl-${generateId()}`;
 
-  // --- Global Fake Stream Override ---
+    // --- Global Fake Stream Override ---
   if (globalSettings.force_fake_stream && stream) {
     streamMode = 'fake';
-    logger.log('Global setting forcing FAKE stream mode.', 'INFO');
+    logger.log('全局设置: 强制使用“假流式”模式。', 'INFO');
   }
 
   // --- Fake Streaming Logic ---
@@ -409,7 +409,7 @@ async function handleChatCompletions(request) {
       break;
     }
     const keyIdentifier = `...${apiKey.slice(-4)}`;
-    logger.log(`Attempt ${i + 1}: Using key ${keyIdentifier} for model ${model}.`);
+    logger.log(`第 ${i + 1} 次尝试: 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
     const requestUrl = new URL(url);
     requestUrl.searchParams.set('key', apiKey);
 
@@ -421,11 +421,11 @@ async function handleChatCompletions(request) {
         signal: controller.signal,
       });
 
-      if (fetchResponse.ok) {
-        response = fetchResponse;
-        logger.log(`Attempt ${i + 1}: Request with key ${keyIdentifier} succeeded.`);
-        break;
-      }
+            if (fetchResponse.ok) {
+                response = fetchResponse;
+                logger.log(`第 ${i + 1} 次尝试: 密钥 ${keyIdentifier} 请求成功。`);
+                break;
+            }
 
       const errorBody = await fetchResponse.text();
       let errorType = `HTTP ${fetchResponse.status}`;
@@ -452,29 +452,29 @@ async function handleChatCompletions(request) {
           errorType = '504 DEADLINE_EXCEEDED';
           break;
       }
-      const errorMessage = `Google API Error: ${errorType} with key ${keyIdentifier}. Body: ${errorBody}`;
-      attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-      logger.log(`Attempt ${i + 1} FAILED: ${errorMessage}`, 'ERROR');
+            const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
+            attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+            logger.log(`第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
       keyManager.reportFailure(apiKey);
     } catch (error) {
-      if (error.name === 'AbortError') {
-        const errorMessage = `Request aborted with key ${keyIdentifier}.`;
-        attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-        logger.log(errorMessage, 'INFO');
-      } else {
-        const errorMessage = `Network error with key ${keyIdentifier}: ${error.message}`;
-        attemptLogs.push(`Attempt ${i + 1}: ${errorMessage}`);
-        logger.log(`Attempt ${i + 1} FAILED: ${errorMessage}`, 'ERROR');
-        keyManager.reportFailure(apiKey);
-      }
+            if (error.name === 'AbortError') {
+                const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。`;
+                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+                logger.log(errorMessage, 'INFO');
+            } else {
+                const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
+                attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
+                logger.log(`第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
+                keyManager.reportFailure(apiKey);
+            }
     }
   }
 
-  if (!response) {
-    const detailedError = `All ${retryAttempts} API key attempts failed. Logs:\n${attemptLogs.join('\n')}`;
-    logger.log(detailedError, 'CRITICAL');
-    throw new HttpError(detailedError, 500);
-  }
+    if (!response) {
+        const detailedError = `所有 ${retryAttempts} 次API密钥尝试均失败。日志:\n${attemptLogs.join('\n')}`;
+        logger.log(detailedError, 'CRITICAL');
+        throw new HttpError(detailedError, 500);
+    }
 
   if (useStreamEndpoint) {
     if (!response.body) throw new HttpError('Response body is null', 500);
@@ -630,22 +630,35 @@ function handleDiagStatus() {
 }
 
 async function handleDiagConfig(request) {
-    if (request.method === 'POST') {
-        try {
-            const body = await request.json();
-            if (typeof body.force_fake_stream === 'boolean') {
-                globalSettings.force_fake_stream = body.force_fake_stream;
-                logger.log(`Global setting 'force_fake_stream' updated to: ${globalSettings.force_fake_stream}`, 'SUCCESS');
-                return new Response(JSON.stringify({ success: true, settings: globalSettings }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-            } else {
-                return new Response(JSON.stringify({ success: false, error: "Invalid 'force_fake_stream' value. Must be a boolean." }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-            }
-        } catch (e) {
-            return new Response(JSON.stringify({ success: false, error: "Invalid JSON body." }), { status: 400, headers: { 'Content-Type': 'application/json' } });
-        }
-    } else { // GET request
-        return new Response(JSON.stringify(globalSettings), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  if (request.method === 'POST') {
+    try {
+      const body = await request.json();
+      if (typeof body.force_fake_stream === 'boolean') {
+        globalSettings.force_fake_stream = body.force_fake_stream;
+                logger.log(`全局设置“强制假流式”已更新为: ${globalSettings.force_fake_stream}`, 'SUCCESS');
+        return new Response(JSON.stringify({ success: true, settings: globalSettings }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      } else {
+        return new Response(
+          JSON.stringify({ success: false, error: "Invalid 'force_fake_stream' value. Must be a boolean." }),
+          { status: 400, headers: { 'Content-Type': 'application/json' } },
+        );
+      }
+    } catch (e) {
+      return new Response(JSON.stringify({ success: false, error: 'Invalid JSON body.' }), {
+        status: 400,
+        headers: { 'Content-Type': 'application/json' },
+      });
     }
+  } else {
+    // GET request
+    return new Response(JSON.stringify(globalSettings), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
 }
 
 // --- Main Entry Point ---
@@ -694,8 +707,8 @@ async function handleRequest(request, env) {
     }
 
     if (pathname.endsWith('/v1/diag/config')) {
-        const response = await handleDiagConfig(request);
-        return addCors(response);
+      const response = await handleDiagConfig(request);
+      return addCors(response);
     }
 
     return addCors(new Response('Not Found', { status: 404 }));
