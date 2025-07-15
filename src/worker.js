@@ -304,6 +304,11 @@ async function handleChatCompletions(request) {
         let keepaliveIntervalId;
         const readable = new ReadableStream({
             async start(streamController) {
+                // Immediately send a keep-alive comment to establish the connection
+                // and prevent the client from timing out while we wait for the full response.
+                streamController.enqueue(': connection established\n\n');
+
+                let keepaliveIntervalId;
                 const sendKeepAlive = () => {
                     try {
                         streamController.enqueue(': keep-alive\n\n');
