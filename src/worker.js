@@ -116,7 +116,7 @@ class KeyManager {
 const keyManager = new KeyManager();
 
 /** @type {{force_fake_stream: boolean}} */
-let globalSettings = { force_fake_stream: false };
+let globalSettings = { force_fake_stream: true };
 
 class GlobalLogger {
   constructor(maxSize = 100) {
