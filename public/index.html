@@ -85,13 +85,6 @@
 
     <div class="container">
         <h2>API 测试</h2>
-        <div class="input-group">
-            <label for="fake-stream-toggle">启用假流式 (全局):</label>
-            <div>
-                <input type="checkbox" id="fake-stream-toggle" checked>
-                <small>打开后, 所有来自客户端的流式请求都将强制使用“假流式”模式。</small>
-            </div>
-        </div>
         <form id="api-test-form">
             <div class="input-group">
                 <label for="api-key-input">API Key (可选, 留空则使用内置密钥池):</label>
@@ -211,61 +204,23 @@
         const userMessage = getEl('user-message');
         const sendButton = getEl('send-button');
         const apiResponseEl = getEl('api-response');
-        const fakeStreamToggle = getEl('fake-stream-toggle');
-
-        // --- Global Settings Sync ---
-        async function syncSettings() {
-            try {
-                const response = await fetch(`${apiHost}/v1/diag/config`);
-                if (response.ok) {
-                    const settings = await response.json();
-                    fakeStreamToggle.checked = settings.force_fake_stream;
-                }
-            } catch (e) {
-                console.error("Failed to sync global settings:", e);
-            }
-        }
-
-        fakeStreamToggle.addEventListener('change', async () => {
-            const newValue = fakeStreamToggle.checked;
-            try {
-                await fetch(`${apiHost}/v1/diag/config`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ force_fake_stream: newValue })
-                });
-            } catch (e) {
-                console.error("Failed to update global settings:", e);
-                // Revert UI on failure
-                fakeStreamToggle.checked = !newValue;
-            }
-        });
-        
-        // Initial sync on page load
-        syncSettings();
-
 
         apiTestForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             sendButton.disabled = true;
-            apiResponseEl.textContent = 'Waiting for response...';
+            apiResponseEl.textContent = '正在请求...';
 
-            // The body no longer needs to send stream_mode, as the server handles it globally.
             const body = {
                 model: modelSelect.value,
                 messages: [{ role: "user", content: userMessage.value }],
-                stream: true, 
+                stream: true,
             };
 
-            const headers = {
-                'Content-Type': 'application/json',
-            };
-            
+            const headers = { 'Content-Type': 'application/json' };
             const customApiKey = apiKeyInput.value.trim();
             if (customApiKey) {
                 headers['Authorization'] = `Bearer ${customApiKey}`;
             }
-
 
             try {
                 const response = await fetch(`${apiHost}/v1/chat/completions`, {
@@ -273,6 +228,11 @@
                     headers: headers,
                     body: JSON.stringify(body)
                 });
+
+                if (!response.ok) {
+                    const errData = await response.json();
+                    throw new Error(errData.error?.message || `HTTP error! status: ${response.status}`);
+                }
 
                 apiResponseEl.textContent = '';
                 const reader = response.body.getReader();
@@ -289,32 +249,21 @@
                         if (line.startsWith('data: ')) {
                             const dataContent = line.substring(6);
                             if (dataContent.trim() === '[DONE]') {
-                                break;
+                                return; // Stream finished
                             }
                             try {
                                 const parsed = JSON.parse(dataContent);
-                                if (parsed.choices && parsed.choices[0].delta && parsed.choices[0].delta.content) {
+                                if (parsed.choices && parsed.choices[0]?.delta?.content) {
                                     apiResponseEl.textContent += parsed.choices[0].delta.content;
-                                } else if (parsed.choices && parsed.choices[0].message) { // For fake stream
-                                    apiResponseEl.textContent = parsed.choices[0].message.content;
                                 }
                             } catch (err) {
-                                // This might be the fake stream's single JSON object
-                                try {
-                                    const parsed = JSON.parse(line);
-                                     if (parsed.choices && parsed.choices[0].message) {
-                                        apiResponseEl.textContent = parsed.choices[0].message.content;
-                                     }
-                                } catch (e) {
-                                    console.error("Error parsing line:", line, e);
-                                }
+                                console.error("Error parsing stream data:", dataContent, err);
                             }
                         }
                     }
                 }
-
             } catch (error) {
-                apiResponseEl.textContent = `Error: ${error.message}`;
+                apiResponseEl.textContent = `错误: ${error.message}`;
                 console.error('API Test Error:', error);
             } finally {
                 sendButton.disabled = false;
