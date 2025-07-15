@@ -395,7 +395,47 @@ async function handleChatCompletions(request, logStore) {
         try {
           const geminiJson = await executeNonStreamRequest(model, geminiRequest, controller.signal, logStore);
           const bodyObj = processCompletionsResponse(geminiJson, model, id);
-          streamController.enqueue(sseline(bodyObj));
+
+          // Emulate a real stream by sending the full response as correctly formatted chunks.
+          const created = bodyObj.created; // Use the original creation time for consistency.
+
+          // 1. Send an initial chunk to establish the role.
+          streamController.enqueue(
+            sseline({
+              id,
+              created,
+              model,
+              object: 'chat.completion.chunk',
+              choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+            }),
+          );
+
+          // 2. Send the entire content in a single chunk.
+          const content = bodyObj.choices[0]?.message?.content;
+          if (content) {
+            streamController.enqueue(
+              sseline({
+                id,
+                created,
+                model,
+                object: 'chat.completion.chunk',
+                choices: [{ index: 0, delta: { content: content }, finish_reason: null }],
+              }),
+            );
+          }
+
+          // 3. Send the final chunk with the finish reason and usage stats.
+          const finish_reason = bodyObj.choices[0]?.finish_reason || 'stop';
+          streamController.enqueue(
+            sseline({
+              id,
+              created,
+              model,
+              object: 'chat.completion.chunk',
+              choices: [{ index: 0, delta: {}, finish_reason: finish_reason }],
+              usage: bodyObj.usage, // Include usage stats in the final chunk.
+            }),
+          );
         } catch (error) {
           console.error('Error in fake streaming execution:', error);
           const errorPayload = { error: { message: error.message, type: 'server_error', code: error.status || 500 } };
