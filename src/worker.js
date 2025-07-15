@@ -117,9 +117,6 @@ class KeyManager {
 // --- Global Instances ---
 const keyManager = new KeyManager();
 
-/** @type {{force_fake_stream: boolean}} */
-let globalSettings = { force_fake_stream: true };
-
 class GlobalLogger {
   constructor(maxSize = 100) {
     this.maxSize = maxSize;
@@ -274,85 +271,6 @@ const processCompletionsResponse = (data, model, id) => {
 
 const sseline = obj => `data: ${JSON.stringify(obj)}\n\n`;
 
-async function executeNonStreamRequest(model, geminiRequest, signal, logStore) {
-  const url = `${BASE_URL}/${API_VERSION}/models/${model}:generateContent`;
-  const retryAttempts = 5;
-  const attemptLogs = [];
-
-  for (let i = 0; i < retryAttempts; i++) {
-    const apiKey = keyManager.getKey();
-    if (!apiKey) {
-      attemptLogs.push(`Attempt ${i + 1}: No available API keys.`);
-      continue;
-    }
-
-    const keyIdentifier = `...${apiKey.slice(-4)}`;
-    await logger.log(logStore, `第 ${i + 1} 次尝试 (非流式): 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
-    const requestUrl = new URL(url);
-    requestUrl.searchParams.set('key', apiKey);
-
-    try {
-      const fetchResponse = await fetch(requestUrl.toString(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(geminiRequest),
-        signal: signal,
-      });
-
-      if (fetchResponse.ok) {
-        await logger.log(logStore, `第 ${i + 1} 次尝试 (非流式): 密钥 ${keyIdentifier} 请求成功。`);
-        return await fetchResponse.json();
-      }
-
-      const errorBody = await fetchResponse.text();
-      let errorType = `HTTP ${fetchResponse.status}`;
-      switch (fetchResponse.status) {
-        case 400:
-          errorType = '400 INVALID_ARGUMENT / FAILED_PRECONDITION';
-          break;
-        case 403:
-          errorType = '403 PERMISSION_DENIED';
-          break;
-        case 404:
-          errorType = '404 NOT_FOUND';
-          break;
-        case 429:
-          errorType = '429 RESOURCE_EXHAUSTED';
-          break;
-        case 500:
-          errorType = '500 INTERNAL_SERVER_ERROR';
-          break;
-        case 503:
-          errorType = '503 UNAVAILABLE';
-          break;
-        case 504:
-          errorType = '504 DEADLINE_EXCEEDED';
-          break;
-      }
-      const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
-      attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-      await logger.log(logStore, `第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
-      keyManager.reportFailure(apiKey);
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。可能原因：客户端超时或断开连接。`;
-        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-        await logger.log(logStore, errorMessage, 'INFO');
-      } else {
-        const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
-        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-        await logger.log(logStore, `第 ${i + 1} 次尝试失败 (非流式): ${errorMessage}`, 'ERROR');
-        keyManager.reportFailure(apiKey);
-      }
-    }
-  }
-  const detailedError = `All ${retryAttempts} API key attempts failed for non-stream request. Logs:\n${attemptLogs.join(
-    '\n',
-  )}`;
-  await logger.log(logStore, detailedError, 'CRITICAL');
-  throw new HttpError(detailedError, 500);
-}
-
 async function handleChatCompletions(request, logStore) {
   const controller = new AbortController();
   request.signal.addEventListener('abort', () => {
@@ -364,70 +282,10 @@ async function handleChatCompletions(request, logStore) {
   const model = openaiRequest.model || 'gemini-1.5-flash';
   const geminiRequest = transformRequestToGemini(openaiRequest);
   const stream = openaiRequest.stream || false;
-  let streamMode = openaiRequest.stream_mode || 'real';
   const id = `chatcmpl-${generateId()}`;
 
-  // --- Global Fake Stream Override ---
-  if (globalSettings.force_fake_stream && stream) {
-    streamMode = 'fake';
-    await logger.log(logStore, '全局设置: 强制使用“假流式”模式。', 'INFO');
-  }
-
-  // --- Fake Streaming Logic ---
-  if (stream && streamMode === 'fake') {
-    const readable = new ReadableStream({
-      async start(streamController) {
-        let keepaliveIntervalId;
-
-        // Start sending standards-compliant keep-alive chunks immediately.
-        // This prevents client timeouts while we wait for the full response.
-        const sendKeepAlive = () => {
-          try {
-            const keepAliveChunk = {
-              id,
-              created: Math.floor(Date.now() / 1000),
-              model,
-              object: 'chat.completion.chunk',
-              choices: [{ index: 0, delta: { content: '' }, finish_reason: null }],
-            };
-            streamController.enqueue(sseline(keepAliveChunk));
-          } catch (e) {
-            console.error('Error sending keep-alive chunk:', e);
-            if (keepaliveIntervalId) clearInterval(keepaliveIntervalId);
-          }
-        };
-        keepaliveIntervalId = setInterval(sendKeepAlive, 8000); // Send every 8 seconds
-
-        try {
-          // Wait for the full response from the non-streaming endpoint.
-          const geminiJson = await executeNonStreamRequest(model, geminiRequest, controller.signal, logStore);
-          
-          // Stop the keep-alive signal once we have the data.
-          clearInterval(keepaliveIntervalId);
-
-          const bodyObj = processCompletionsResponse(geminiJson, model, id);
-
-          // 根据用户要求，在假流式传输中，将完整的非流式对象作为单个数据事件发送。
-          streamController.enqueue(sseline(bodyObj));
-        } catch (error) {
-          console.error('Error in fake streaming execution:', error);
-          const errorPayload = { error: { message: error.message, type: 'server_error', code: error.status || 500 } };
-          streamController.enqueue(sseline(errorPayload));
-        } finally {
-          if (keepaliveIntervalId) clearInterval(keepaliveIntervalId);
-          // Always close the stream with a [DONE] message.
-          streamController.enqueue('data: [DONE]\n\n');
-          streamController.close();
-        }
-      },
-    });
-    return new Response(readable.pipeThrough(new TextEncoderStream()), {
-      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
-    });
-  }
-
   // --- Real Streaming or Non-Streaming Logic ---
-  const useStreamEndpoint = stream && streamMode === 'real';
+  const useStreamEndpoint = stream;
   const url = `${BASE_URL}/${API_VERSION}/models/${model}:${
     useStreamEndpoint ? 'streamGenerateContent?alt=sse' : 'generateContent'
   }`;
@@ -664,38 +522,6 @@ function handleDiagStatus() {
   });
 }
 
-async function handleDiagConfig(request, logStore) {
-  if (request.method === 'POST') {
-    try {
-      const body = await request.json();
-      if (typeof body.force_fake_stream === 'boolean') {
-        globalSettings.force_fake_stream = body.force_fake_stream;
-        await logger.log(logStore, `全局设置“强制假流式”已更新为: ${globalSettings.force_fake_stream}`, 'SUCCESS');
-        return new Response(JSON.stringify({ success: true, settings: globalSettings }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      } else {
-        return new Response(
-          JSON.stringify({ success: false, error: "Invalid 'force_fake_stream' value. Must be a boolean." }),
-          { status: 400, headers: { 'Content-Type': 'application/json' } },
-        );
-      }
-    } catch (e) {
-      return new Response(JSON.stringify({ success: false, error: 'Invalid JSON body.' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-  } else {
-    // GET request
-    return new Response(JSON.stringify(globalSettings), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
-  }
-}
-
 // --- Main Entry Point ---
 
 /**
@@ -746,11 +572,6 @@ async function handleRequest(request, context) {
 
     if (pathname.endsWith('/v1/diag/logs')) {
       const response = await handleDiagLogs(logStore);
-      return addCors(response);
-    }
-
-    if (pathname.endsWith('/v1/diag/config')) {
-      const response = await handleDiagConfig(request, logStore);
       return addCors(response);
     }
 
