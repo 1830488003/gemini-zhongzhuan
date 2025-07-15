@@ -1,17 +1,15 @@
 // @ts-check
-// @ts-ignore
-import { getStore } from 'netlify:blob';
+import { Buffer } from "node:buffer";
 
-/**
- * Final Architecture: Replicating hajimi-main's KeyManager and ActiveRequestManager patterns.
- * This version includes robust key management and intelligent request coalescing for concurrent identical requests.
- */
+let getStore;
+try {
+  // @ts-ignore
+  ({ getStore } = await import('netlify:blob'));
+} catch (e) {
+  // ignore
+}
 
-// --- Configuration ---
-const CUSTOM_AUTH_KEY = '67564534';
-const BASE_URL = 'https://generativelanguage.googleapis.com';
-const API_VERSION = 'v1beta';
-// --- End Configuration ---
+// --- Custom Classes & Global Instances (Retained from original project) ---
 
 class HttpError extends Error {
   constructor(message, status) {
@@ -21,11 +19,6 @@ class HttpError extends Error {
   }
 }
 
-// --- Core Managers ---
-
-/**
- * Manages API keys, including rotation and temporary failure blacklisting.
- */
 class KeyManager {
   constructor() {
     /** @type {string[]} */
@@ -83,144 +76,282 @@ class KeyManager {
     /** @type {Map<string, number>} */
     this.usageStats = new Map(); // Store key and its usage count
     this.FAILURE_COOLDOWN = 10 * 60 * 1000; // 10 minutes
-    console.log(`KeyManager: Initialized with ${this.keys.length} built-in keys.`);
     this.keys.forEach(key => this.usageStats.set(key, 0));
   }
-
-  _incrementUsage(key) {
-    if (key) {
-      const currentCount = this.usageStats.get(key) || 0;
-      this.usageStats.set(key, currentCount + 1);
-    }
-  }
-
+  _incrementUsage(key) { if (key) this.usageStats.set(key, (this.usageStats.get(key) || 0) + 1); }
   getKey() {
     const now = Date.now();
     const availableKeys = this.keys.filter(key => {
-      const failureTime = this.failedKeys.get(key);
-      return !failureTime || now - failureTime > this.FAILURE_COOLDOWN;
+        const failedTime = this.failedKeys.get(key);
+        return failedTime === undefined || (now - failedTime > this.FAILURE_COOLDOWN);
     });
     if (availableKeys.length === 0) return null;
     const key = availableKeys[Math.floor(Math.random() * availableKeys.length)];
     this._incrementUsage(key);
     return key;
   }
-
-  reportFailure(key) {
-    if (key) {
-      this.failedKeys.set(key, Date.now());
-      console.warn(`密钥管理器: 报告密钥 ...${key.slice(-4)} 失效，冷却期开始。`);
-    }
-  }
+  reportFailure(key) { if (key) this.failedKeys.set(key, Date.now()); }
 }
-
-// --- Global Instances ---
-const keyManager = new KeyManager();
 
 class GlobalLogger {
-  constructor(maxSize = 100) {
-    this.maxSize = maxSize;
-  }
-
+  constructor(maxSize = 100) { this.maxSize = maxSize; }
   async log(store, message, type = 'INFO') {
-    if (!store) {
-      console.log(`(No-Store) [${type}] ${message}`);
-      return;
-    }
+    if (!store) { console.log(`(No-Store) [${type}] ${message}`); return; }
     try {
-      const timestamp = new Date().toISOString();
-      const logEntry = { timestamp, type, message };
-
-      const currentLogs = (await store.get('latest_logs', { type: 'json' })) || [];
-      currentLogs.unshift(logEntry);
-
-      if (currentLogs.length > this.maxSize) {
-        currentLogs.splice(this.maxSize);
-      }
-      await store.setJSON('latest_logs', currentLogs);
-    } catch (e) {
-      console.error('Blob Store Write Error:', e);
-    }
+      const logEntry = { timestamp: new Date().toISOString(), type, message };
+      const logs = (await store.get('latest_logs', { type: 'json' })) || [];
+      logs.unshift(logEntry);
+      if (logs.length > this.maxSize) logs.splice(this.maxSize);
+      await store.setJSON('latest_logs', logs);
+    } catch (e) { console.error('Blob Store Write Error:', e); }
   }
-
   async getLogs(store) {
     if (!store) return [];
-    try {
-      return (await store.get('latest_logs', { type: 'json' })) || [];
-    } catch (e) {
-      console.error('Blob Store Read Error:', e);
-      return [];
-    }
+    try { return (await store.get('latest_logs', { type: 'json' })) || []; }
+    catch (e) { console.error('Blob Store Read Error:', e); return []; }
   }
 }
+
+const keyManager = new KeyManager();
 const logger = new GlobalLogger();
 
-// --- Data Transformation ---
+// --- Core Logic from openai-gemini-main (with adaptations) ---
 
-function convertMessagesToGemini(messages) {
-  /** @type {{parts: {text: string}[]} | null} */
-  let system_instruction = null;
-  const contents = [];
-  let lastRole = null;
-  for (const message of messages) {
-    const role = message.role === 'assistant' ? 'model' : 'user';
-    if (message.role === 'system') {
-      if (!system_instruction) system_instruction = { parts: [] };
-      if (typeof message.content === 'string') system_instruction.parts.push({ text: message.content });
+const BASE_URL = "https://generativelanguage.googleapis.com";
+const API_VERSION = "v1beta";
+const API_CLIENT = "genai-js/0.21.0";
+
+const makeHeaders = (apiKey) => ({
+  "x-goog-api-client": API_CLIENT,
+  "x-goog-api-key": apiKey,
+  "Content-Type": "application/json",
+});
+
+const fixCors = (response) => {
+    if (!response) {
+        return new Response(null, { status: 204, headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Content-Type, Authorization",
+        }});
+    }
+    const headers = new Headers(response.headers);
+    headers.set("Access-Control-Allow-Origin", "*");
+    headers.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+};
+
+const handleOPTIONS = () => {
+  return new Response(null, {
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "*",
+      "Access-Control-Allow-Headers": "*",
+    }
+  });
+};
+
+const DEFAULT_MODEL = "gemini-1.5-flash";
+async function handleCompletions (req, logStore) {
+  const controller = new AbortController();
+  if (req.signal) {
+    // @ts-ignore
+    req.signal.addEventListener('abort', () => controller.abort());
+  }
+
+  let model = DEFAULT_MODEL;
+  if (typeof req.model === "string") {
+      if (req.model.startsWith("models/")) model = req.model.substring(7);
+      else if (req.model.startsWith("gemini-") || req.model.startsWith("gemma-")) model = req.model;
+  }
+
+  const geminiRequestBody = await transformRequest(req);
+  const TASK = req.stream ? "streamGenerateContent" : "generateContent";
+  let url = `${BASE_URL}/${API_VERSION}/models/${model}:${TASK}`;
+  if (req.stream) { url += "?alt=sse"; }
+
+  let response;
+  const retryAttempts = 5;
+  const attemptLogs = [];
+
+  for (let i = 0; i < retryAttempts; i++) {
+    const apiKey = keyManager.getKey();
+    if (!apiKey) {
+      attemptLogs.push(`Attempt ${i + 1}: No available API keys.`);
       continue;
     }
-    const parts = [{ text: message.content }];
-    if (role === lastRole && contents.length > 0) {
-      contents[contents.length - 1].parts.push(...parts);
-    } else {
-      contents.push({ role, parts });
-      lastRole = role;
+    const keyIdentifier = `...${apiKey.slice(-4)}`;
+    await logger.log(logStore, `第 ${i + 1} 次尝试: 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
+
+    try {
+      const fetchResponse = await fetch(url, {
+        method: "POST",
+        headers: makeHeaders(apiKey),
+        body: JSON.stringify(geminiRequestBody),
+        signal: controller.signal,
+      });
+
+      if (fetchResponse.ok) {
+        response = fetchResponse;
+        await logger.log(logStore, `第 ${i + 1} 次尝试: 密钥 ${keyIdentifier} 请求成功。`);
+        break; // Success, exit loop
+      }
+
+      const errorBody = await fetchResponse.text();
+      const errorMessage = `Google API Error: ${fetchResponse.status} (Key ${keyIdentifier}). Details: ${errorBody}`;
+      attemptLogs.push(`Attempt ${i + 1} failed: ${errorMessage}`);
+      await logger.log(logStore, `第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
+      keyManager.reportFailure(apiKey);
+
+    } catch (error) {
+      const errorMessage = `Network Error (Key ${keyIdentifier}): ${error.message}`;
+      attemptLogs.push(`Attempt ${i + 1} failed: ${errorMessage}`);
+      await logger.log(logStore, `第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
+      keyManager.reportFailure(apiKey);
     }
   }
-  return { contents, system_instruction };
-}
 
-function transformRequestToGemini(openaiRequest) {
-  const { contents, system_instruction } = convertMessagesToGemini(openaiRequest.messages || []);
-  const generationConfig = {
-    temperature: openaiRequest.temperature,
-    maxOutputTokens: openaiRequest.max_tokens,
-    topP: openaiRequest.top_p,
-    topK: openaiRequest.top_k,
-    stopSequences: typeof openaiRequest.stop === 'string' ? [openaiRequest.stop] : openaiRequest.stop,
-    candidateCount: openaiRequest.n,
-  };
-  Object.keys(generationConfig).forEach(key => generationConfig[key] === undefined && delete generationConfig[key]);
-  const safetySettings = [
-    { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' },
-    { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
-  ];
-  const geminiRequest = { contents, generationConfig, safetySettings };
-  if (system_instruction) {
-    geminiRequest.system_instruction = system_instruction;
+  if (!response) {
+    const detailedError = `All ${retryAttempts} API key attempts failed. Logs:\n${attemptLogs.join('\n')}`;
+    await logger.log(logStore, detailedError, 'CRITICAL');
+    throw new HttpError(detailedError, 500);
   }
-  return geminiRequest;
+
+  if (!response.ok) {
+    return fixCors(response);
+  }
+
+  let id = "chatcmpl-" + generateId();
+
+  if (req.stream) {
+    if (!response.body) {
+        throw new HttpError("Response body is null for stream", 500);
+    }
+    const decodedStream = response.body.pipeThrough(new TextDecoderStream());
+    const stream = createStreamTransformer(decodedStream, id, model, req.stream_options?.include_usage);
+    return fixCors(new Response(stream, { status: response.status, statusText: response.statusText, headers: response.headers }));
+  } else {
+    const text = await response.text();
+    let data;
+    try {
+      data = JSON.parse(text);
+      if (!data.candidates) throw new Error("Invalid completion object");
+    } catch (err) {
+      await logger.log(logStore, `Error parsing non-stream response: ${err}`, 'ERROR');
+      return fixCors(new Response(text, { status: response.status, statusText: response.statusText, headers: response.headers }));
+    }
+    const body = processCompletionsResponse(data, model, id);
+    return fixCors(new Response(body, { status: response.status, headers: { 'Content-Type': 'application/json' } }));
+  }
 }
 
-// --- Core Request Logic ---
-
-const generateId = () => {
-  const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  const randomChar = () => characters[Math.floor(Math.random() * characters.length)];
-  return Array.from({ length: 29 }, randomChar).join('');
+const adjustProps = (schemaPart) => {
+  if (typeof schemaPart !== "object" || schemaPart === null) return;
+  if (Array.isArray(schemaPart)) {
+    schemaPart.forEach(adjustProps);
+  } else {
+    if (schemaPart.type === "object" && schemaPart.properties && schemaPart.additionalProperties === false) {
+      delete schemaPart.additionalProperties;
+    }
+    Object.values(schemaPart).forEach(adjustProps);
+  }
+};
+const adjustSchema = (schema) => {
+  if (schema && schema.type && schema[schema.type]) {
+    const obj = schema[schema.type];
+    if (obj) delete obj.strict;
+  }
+  return adjustProps(schema);
 };
 
-const reasonsMap = {
-  STOP: 'stop',
-  MAX_TOKENS: 'length',
-  SAFETY: 'content_filter',
-  RECITATION: 'content_filter',
+const harmCategory = ["HARM_CATEGORY_HATE_SPEECH", "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT", "HARM_CATEGORY_HARASSMENT"];
+const safetySettings = harmCategory.map(category => ({ category, threshold: "BLOCK_NONE" }));
+
+const fieldsMap = {
+  frequency_penalty: "frequencyPenalty",
+  max_tokens: "maxOutputTokens",
+  n: "candidateCount",
+  presence_penalty: "presencePenalty",
+  seed: "seed",
+  stop: "stopSequences",
+  temperature: "temperature",
+  top_k: "topK",
+  top_p: "topP",
 };
+
+const transformConfig = (req) => {
+  let cfg = {};
+  for (let key in req) {
+    const matchedKey = fieldsMap[key];
+    if (matchedKey) cfg[matchedKey] = req[key];
+  }
+  if (req.response_format?.type === "json_object") {
+    cfg.responseMimeType = "application/json";
+  }
+  return cfg;
+};
+
+const parseImg = async (url) => {
+  let mimeType, data;
+  if (url.startsWith("http")) {
+    const response = await fetch(url);
+    mimeType = response.headers.get("content-type");
+    data = Buffer.from(await response.arrayBuffer()).toString("base64");
+  } else {
+    const match = url.match(/^data:(?<mimeType>.*?)(;base64)?,(?<data>.*)$/);
+    if (!match || !match.groups) throw new HttpError("Invalid image data", 400);
+    ({ mimeType, data } = match.groups);
+  }
+  return { inlineData: { mimeType, data } };
+};
+
+const transformMsg = async ({ content }) => {
+  if (!Array.isArray(content)) return [{ text: content || " " }];
+  const parts = [];
+  for (const item of content) {
+    if (item.type === "text") parts.push({ text: item.text });
+    else if (item.type === "image_url" && item.image_url) parts.push(await parseImg(item.image_url.url));
+    else throw new HttpError(`Unknown or invalid content type: ${item.type}`, 400);
+  }
+  return parts;
+};
+
+const transformMessages = async (messages) => {
+  const contents = [];
+  let system_instruction;
+  for (const item of messages) {
+    if (item.role === "system") {
+      system_instruction = { parts: await transformMsg(item) };
+      continue;
+    }
+    const role = item.role === "assistant" ? "model" : "user";
+    contents.push({ role, parts: await transformMsg(item) });
+  }
+  return { contents, system_instruction };
+};
+
+const transformTools = (req) => {
+  if (!req.tools) return {};
+  const funcs = req.tools.filter(tool => tool.type === "function");
+  funcs.forEach(adjustSchema);
+  const function_declarations = funcs.map(schema => schema.function);
+  return { tools: [{ function_declarations }] };
+};
+
+const transformRequest = async (req) => ({
+  ...await transformMessages(req.messages),
+  safetySettings,
+  generationConfig: transformConfig(req),
+  ...transformTools(req),
+});
+
+const generateId = () => Array.from({ length: 29 }, () => "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"[Math.floor(Math.random() * 62)]).join("");
+
+const reasonsMap = { STOP: "stop", MAX_TOKENS: "length", SAFETY: "content_filter", RECITATION: "content_filter" };
 
 const transformCandidates = (key, cand) => {
-  const message = { role: 'assistant', content: null };
+  const message = { role: "assistant", content: null };
   if (cand.content?.parts?.[0]?.text) {
     message.content = cand.content.parts[0].text;
   }
@@ -231,265 +362,148 @@ const transformCandidates = (key, cand) => {
     finish_reason: reasonsMap[cand.finishReason] || cand.finishReason,
   };
 };
-const transformCandidatesMessage = transformCandidates.bind(null, 'message');
-const transformCandidatesDelta = transformCandidates.bind(null, 'delta');
+const transformCandidatesMessage = transformCandidates.bind(null, "message");
+const transformCandidatesDelta = transformCandidates.bind(null, "delta");
 
-const transformUsage = data => ({
+const transformUsage = (data) => ({
   completion_tokens: data.candidatesTokenCount,
   prompt_tokens: data.promptTokenCount,
-  total_tokens: data.totalTokenCount,
+  total_tokens: data.totalTokenCount
 });
-
-const checkPromptBlock = (choices, promptFeedback, key) => {
-  if (choices.length) {
-    return;
-  }
-  if (promptFeedback?.blockReason) {
-    choices.push({
-      index: 0,
-      [key]: null,
-      finish_reason: 'content_filter',
-    });
-  }
-  return true;
-};
 
 const processCompletionsResponse = (data, model, id) => {
   const obj = {
     id,
     choices: data.candidates.map(transformCandidatesMessage),
-    created: Math.floor(Date.now() / 1000),
+    created: Math.floor(Date.now()/1000),
     model: model,
-    object: 'chat.completion',
+    object: "chat.completion",
     usage: data.usageMetadata && transformUsage(data.usageMetadata),
   };
-  if (obj.choices.length === 0) {
-    checkPromptBlock(obj.choices, data.promptFeedback, 'message');
+  if (obj.choices.length === 0 && data.promptFeedback?.blockReason) {
+    obj.choices.push({ index: 0, message: null, finish_reason: "content_filter" });
   }
-  return obj;
+  return JSON.stringify(obj);
 };
 
-const sseline = obj => `data: ${JSON.stringify(obj)}\n\n`;
+const delimiter = "\n\n";
+const sseline = (obj) => `data: ${JSON.stringify(obj)}${delimiter}`;
 
-async function handleChatCompletions(request, logStore) {
-  const controller = new AbortController();
-  request.signal.addEventListener('abort', () => {
-    logger.log(logStore, '客户端连接已断开，正在中止外部请求。', 'INFO');
-    controller.abort();
-  });
+function createStreamTransformer(inputStream, id, model, streamIncludeUsage) {
+    const responseLineRE = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
+    let buffer = "";
+    let is_buffers_rest = false;
+    const last = [];
 
-  const openaiRequest = await request.clone().json();
-  const model = openaiRequest.model || 'gemini-1.5-flash';
-  const geminiRequest = transformRequestToGemini(openaiRequest);
-  const stream = openaiRequest.stream || false;
-  const id = `chatcmpl-${generateId()}`;
-
-  // --- Real Streaming or Non-Streaming Logic ---
-  const useStreamEndpoint = stream;
-  const url = `${BASE_URL}/${API_VERSION}/models/${model}:${
-    useStreamEndpoint ? 'streamGenerateContent?alt=sse' : 'generateContent'
-  }`;
-  let response;
-  const retryAttempts = 5;
-  const attemptLogs = [];
-
-  for (let i = 0; i < retryAttempts; i++) {
-    const apiKey = keyManager.getKey();
-    if (!apiKey) {
-      attemptLogs.push(`Attempt ${i + 1}: No available API keys.`);
-      break;
+    function parseStream(chunk, controller) {
+        buffer += chunk;
+        let match;
+        while ((match = buffer.match(responseLineRE))) {
+            controller.enqueue(match[1]);
+            buffer = buffer.substring(match[0].length);
+        }
     }
-    const keyIdentifier = `...${apiKey.slice(-4)}`;
-    await logger.log(logStore, `第 ${i + 1} 次尝试: 使用密钥 ${keyIdentifier} 请求模型 ${model}。`);
-    const requestUrl = new URL(url);
-    requestUrl.searchParams.set('key', apiKey);
 
-    try {
-      const fetchResponse = await fetch(requestUrl.toString(), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(geminiRequest),
-        signal: controller.signal,
-      });
-
-      if (fetchResponse.ok) {
-        response = fetchResponse;
-        await logger.log(logStore, `第 ${i + 1} 次尝试: 密钥 ${keyIdentifier} 请求成功。`);
-        break;
-      }
-
-      const errorBody = await fetchResponse.text();
-      let errorType = `HTTP ${fetchResponse.status}`;
-      switch (fetchResponse.status) {
-        case 400:
-          errorType = '400 INVALID_ARGUMENT / FAILED_PRECONDITION';
-          break;
-        case 403:
-          errorType = '403 PERMISSION_DENIED';
-          break;
-        case 404:
-          errorType = '404 NOT_FOUND';
-          break;
-        case 429:
-          errorType = '429 RESOURCE_EXHAUSTED';
-          break;
-        case 500:
-          errorType = '500 INTERNAL_SERVER_ERROR';
-          break;
-        case 503:
-          errorType = '503 UNAVAILABLE';
-          break;
-        case 504:
-          errorType = '504 DEADLINE_EXCEEDED';
-          break;
-      }
-      const errorMessage = `Google API 错误: ${errorType} (密钥 ${keyIdentifier})。详情: ${errorBody}`;
-      attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-      await logger.log(logStore, `第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
-      keyManager.reportFailure(apiKey);
-    } catch (error) {
-      if (error.name === 'AbortError') {
-        const errorMessage = `请求被客户端中断 (密钥 ${keyIdentifier})。`;
-        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-        await logger.log(logStore, errorMessage, 'INFO');
-      } else {
-        const errorMessage = `网络错误 (密钥 ${keyIdentifier}): ${error.message}`;
-        attemptLogs.push(`第 ${i + 1} 次尝试失败: ${errorMessage}`);
-        await logger.log(logStore, `第 ${i + 1} 次尝试失败: ${errorMessage}`, 'ERROR');
-        keyManager.reportFailure(apiKey);
-      }
+    function parseStreamFlush(controller) {
+        if (buffer) {
+            console.error("Invalid data in stream buffer:", buffer);
+            controller.enqueue(buffer);
+            is_buffers_rest = true;
+        }
     }
-  }
 
-  if (!response) {
-    const detailedError = `所有 ${retryAttempts} 次API密钥尝试均失败。日志:\n${attemptLogs.join('\n')}`;
-    await logger.log(logStore, detailedError, 'CRITICAL');
-    throw new HttpError(detailedError, 500);
-  }
+    function toOpenAiStream(line, controller) {
+        let data;
+        try {
+            data = JSON.parse(line);
+            if (!data.candidates) throw new Error("Invalid completion chunk object");
+        } catch (err) {
+            if (!is_buffers_rest) line += delimiter;
+            controller.enqueue(line);
+            return;
+        }
+        const obj = {
+            id: id,
+            choices: data.candidates.map(transformCandidatesDelta),
+            created: Math.floor(Date.now() / 1000),
+            model: model,
+            object: "chat.completion.chunk",
+        };
 
-  if (useStreamEndpoint) {
-    if (!response.body) throw new HttpError('Response body is null', 500);
-    const streamState = { buffer: '', firstChunkSent: false };
-    const readable = response.body
-      .pipeThrough(new TextDecoderStream())
-      .pipeThrough(
-        new TransformStream({
-          transform(chunk, controller) {
-            streamState.buffer += chunk;
-            const lines = streamState.buffer.split('\n');
-            streamState.buffer = lines.pop() || '';
-            for (const line of lines) {
-              if (line.startsWith('data: ')) {
-                try {
-                  controller.enqueue(JSON.parse(line.substring(6)));
-                } catch (e) {
-                  console.error('Could not parse stream line:', line);
-                }
-              }
+        if (obj.choices.length === 0) {
+            if (data.promptFeedback?.blockReason) {
+                obj.choices.push({ index: 0, delta: {}, finish_reason: "content_filter" });
+                controller.enqueue(sseline(obj));
             }
-          },
-        }),
-      )
-      .pipeThrough(
-        new TransformStream({
-          transform(geminiChunk, controller) {
-            if (!geminiChunk.candidates) {
-              console.error('Invalid stream chunk:', geminiChunk);
-              return;
+            return;
+        }
+
+        const cand = obj.choices[0];
+        if (!cand) return;
+
+        const finish_reason = cand.finish_reason;
+        cand.finish_reason = null;
+
+        if (!last[cand.index]) {
+            controller.enqueue(sseline({ ...obj, choices: [{ ...cand, delta: { role: "assistant", content: "" } }] }));
+        }
+        
+        if (cand.delta) {
+            delete cand.delta.role;
+            if ("content" in cand.delta) {
+                controller.enqueue(sseline(obj));
             }
-            const created = Math.floor(Date.now() / 1000);
-            const choice = transformCandidatesDelta(geminiChunk.candidates[0]);
-            if (!streamState.firstChunkSent) {
-              controller.enqueue(
-                sseline({
-                  id,
-                  created,
-                  model,
-                  object: 'chat.completion.chunk',
-                  choices: [{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }],
-                }),
-              );
-              streamState.firstChunkSent = true;
+        }
+
+        cand.finish_reason = finish_reason;
+        if (data.usageMetadata && streamIncludeUsage) {
+            obj.usage = transformUsage(data.usageMetadata);
+        }
+        cand.delta = {};
+        last[cand.index] = obj;
+    }
+
+    function toOpenAiStreamFlush(controller) {
+        if (last.length > 0) {
+            for (const obj of last) {
+                if (obj) controller.enqueue(sseline(obj));
             }
-            if (choice.delta.content) {
-              controller.enqueue(
-                sseline({
-                  id,
-                  created,
-                  model,
-                  object: 'chat.completion.chunk',
-                  choices: [{ index: choice.index, delta: { content: choice.delta.content }, finish_reason: null }],
-                }),
-              );
-            }
-            if (choice.finish_reason) {
-              controller.enqueue(
-                sseline({
-                  id,
-                  created,
-                  model,
-                  object: 'chat.completion.chunk',
-                  choices: [{ index: choice.index, delta: {}, finish_reason: choice.finish_reason }],
-                }),
-              );
-            }
-          },
-          flush(controller) {
-            controller.enqueue('data: [DONE]\n\n');
-          },
-        }),
-      )
-      .pipeThrough(new TextEncoderStream());
-    return new Response(readable, {
-      headers: { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' },
+        }
+        controller.enqueue(`data: [DONE]${delimiter}`);
+    }
+
+    const parser = new TransformStream({
+        transform: parseStream,
+        flush: parseStreamFlush,
     });
-  } else {
-    const geminiJson = await response.json();
-    const bodyObj = processCompletionsResponse(geminiJson, model, id);
-    return new Response(JSON.stringify(bodyObj), { headers: { 'Content-Type': 'application/json' } });
-  }
+
+    const transformer = new TransformStream({
+        transform: toOpenAiStream,
+        flush: toOpenAiStreamFlush,
+    });
+
+    const textEncoderStream = new TextEncoderStream();
+    inputStream.pipeThrough(parser).pipeThrough(transformer).pipeTo(textEncoderStream.writable);
+    return textEncoderStream.readable;
 }
 
-// --- Request Handling ---
-
-/**
- * Handles requests for the model list.
- * @returns {Promise<Response>}
- */
-async function handleModels() {
-  const apiKey = keyManager.getKey();
-  if (!apiKey) {
-    throw new HttpError('No available API keys to fetch models.', 503);
-  }
-  const url = `${BASE_URL}/${API_VERSION}/models?key=${apiKey}`;
-  try {
-    const response = await fetch(url);
+async function handleModels(logStore) {
+    const apiKey = keyManager.getKey();
+    if (!apiKey) throw new HttpError('No available API keys to fetch models.', 503);
+    await logger.log(logStore, `Fetching models with key ...${apiKey.slice(-4)}`);
+    const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, { headers: makeHeaders(apiKey) });
     if (!response.ok) {
-      throw new HttpError(`Failed to fetch models from Google: ${response.status}`, response.status);
+        keyManager.reportFailure(apiKey);
+        throw new HttpError(`Failed to fetch models from Google: ${response.status}`, response.status);
     }
-    const googleJson = await response.json();
+    const { models } = await response.json();
     const openAIResponse = {
-      object: 'list',
-      data: googleJson.models.map(model => ({
-        id: model.name.replace('models/', ''),
-        object: 'model',
-        created: new Date(model.createTime).getTime() / 1000,
-        owned_by: 'google',
-      })),
+        object: "list",
+        data: models.map(({ name }) => ({ id: name.replace("models/", ""), object: "model", created: 0, owned_by: "google" })),
     };
     return new Response(JSON.stringify(openAIResponse), { headers: { 'Content-Type': 'application/json' } });
-  } catch (error) {
-    console.error('Error in handleModels:', error);
-    keyManager.reportFailure(apiKey);
-    throw error;
-  }
 }
 
-/**
- * Handles requests for the diagnostic logs.
- * @param {any} store The blob store for logs.
- * @returns {Promise<Response>}
- */
 async function handleDiagLogs(store) {
   const logs = await logger.getLogs(store);
   return new Response(JSON.stringify(logs), { headers: { 'Content-Type': 'application/json' } });
@@ -501,96 +515,58 @@ function handleDiagStatus() {
     const failureTime = keyManager.failedKeys.get(key);
     const cooldownRemaining = failureTime ? Math.max(0, failureTime + keyManager.FAILURE_COOLDOWN - now) : 0;
     const status = cooldownRemaining > 0 ? 'cooldown' : 'available';
-
     return {
       id: `...${key.slice(-4)}`,
       status: status,
       usageCount: keyManager.usageStats.get(key) || 0,
-      cooldownUntil:
-        status === 'cooldown' && failureTime ? new Date(failureTime + keyManager.FAILURE_COOLDOWN).toISOString() : null,
+      cooldownUntil: status === 'cooldown' && failureTime ? new Date(failureTime + keyManager.FAILURE_COOLDOWN).toISOString() : null,
     };
   });
-
   const summary = {
     totalKeys: keyManager.keys.length,
     availableKeys: keyDetails.filter(k => k.status === 'available').length,
     cooldownKeys: keyDetails.filter(k => k.status === 'cooldown').length,
   };
-
-  return new Response(JSON.stringify({ summary, details: keyDetails }), {
-    headers: { 'Content-Type': 'application/json' },
-  });
+  return new Response(JSON.stringify({ summary, details: keyDetails }), { headers: { 'Content-Type': 'application/json' } });
 }
 
 // --- Main Entry Point ---
-
-/**
- * @param {Request} request
- * @param {import('@netlify/edge-functions').Context} context
- * @returns {Promise<Response>}
- */
-async function handleRequest(request, context) {
-  const addCors = response => {
-    response.headers.set('Access-Control-Allow-Origin', '*');
-    response.headers.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    response.headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-    return response;
-  };
-
-  // @ts-ignore
-  const logStore = context.blobs ? getStore(context, 'global-logs') : null;
-
-  try {
-    if (request.method === 'OPTIONS') {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': '*',
-          'Access-Control-Allow-Headers': '*',
-        },
-      });
-    }
-
-    // verifyAuth(request); // Removed custom auth to allow any key from client.
-
-    const { pathname } = new URL(request.url);
-    if (pathname.endsWith('/chat/completions')) {
-      const response = await handleChatCompletions(request, logStore);
-      return addCors(response);
-    }
-
-    if (pathname.endsWith('/v1/models')) {
-      const response = await handleModels();
-      return addCors(response);
-    }
-
-    if (pathname.endsWith('/v1/diag/status')) {
-      const response = handleDiagStatus();
-      return addCors(response);
-    }
-
-    if (pathname.endsWith('/v1/diag/logs')) {
-      const response = await handleDiagLogs(logStore);
-      return addCors(response);
-    }
-
-    return addCors(new Response('Not Found', { status: 404 }));
-  } catch (error) {
-    console.error('Unhandled error in handleRequest:', error);
-    const status = error instanceof HttpError ? error.status : 500;
-    const message = error instanceof Error ? error.message : 'An unknown error occurred.';
-    if (logStore) {
-      await logger.log(logStore, `Request failed with unhandled error: ${message}`, 'CRITICAL');
-    }
-    const errorResponse = new Response(JSON.stringify({ error: { message, type: 'server_error' } }), {
-      status,
-      headers: { 'Content-Type': 'application/json' },
-    });
-    return addCors(errorResponse);
-  }
-}
-
 export default {
-  fetch: handleRequest,
+  async fetch (request, context) {
+    if (request.method === "OPTIONS") {
+      return handleOPTIONS();
+    }
+    // @ts-ignore
+    const logStore = context.blobs ? getStore(context, 'global-logs') : null;
+    const errHandler = async (err) => {
+      console.error(err);
+      const status = err.status ?? 500;
+      const message = err.message ?? 'An unknown error occurred.';
+      await logger.log(logStore, `Request failed with unhandled error: ${message}`, 'CRITICAL');
+      const errorResponse = new Response(JSON.stringify({ error: { message, type: 'server_error' } }), { status, headers: { 'Content-Type': 'application/json' } });
+      return fixCors(errorResponse);
+    };
+
+    try {
+      const { pathname } = new URL(request.url);
+      switch (true) {
+        case pathname.endsWith("/v1/chat/completions"):
+          if (request.method !== "POST") throw new HttpError("Method not allowed", 405);
+          const reqJson = await request.json();
+          // @ts-ignore
+          reqJson.signal = request.signal;
+          return await handleCompletions(reqJson, logStore).catch(errHandler);
+        case pathname.endsWith("/v1/models"):
+          return await handleModels(logStore).then(fixCors).catch(errHandler);
+        case pathname.endsWith('/v1/diag/status'):
+          return fixCors(handleDiagStatus());
+        case pathname.endsWith('/v1/diag/logs'):
+          return await handleDiagLogs(logStore).then(fixCors).catch(errHandler);
+        default:
+          return fixCors(new Response("Not Found", { status: 404 }));
+      }
+    } catch (err) {
+      return errHandler(err);
+    }
+  }
 };

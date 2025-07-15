@@ -1,9 +1,7 @@
-  import { handleRequest } from "./handle_request.js";
+import worker from "./worker.js";
 
-  export default {
-    async fetch (req, env, context) {
-      const url = new URL(req.url);
-      console.log('Request URL:', req.url); 
-      return handleRequest(req);
-    }
+export default {
+  async fetch (req, env, context) {
+    return worker.fetch(req, env, context);
   }
+};
