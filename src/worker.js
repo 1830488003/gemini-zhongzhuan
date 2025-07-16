@@ -514,8 +514,17 @@ async function handleModels(logStore) {
     await logger.log(logStore, `Using key ${keyIdentifier} to fetch model list.`);
 
     try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10-second timeout
+
         const url = `${BASE_URL}/${API_VERSION}/models?key=${apiKey}`;
-        const response = await fetch(url, { method: 'GET', headers: { "Content-Type": "application/json" } });
+        const response = await fetch(url, { 
+            method: 'GET', 
+            headers: { "Content-Type": "application/json" },
+            signal: controller.signal 
+        });
+        
+        clearTimeout(timeoutId);
 
         if (!response.ok) {
             keyManager.reportFailure(apiKey);
@@ -550,9 +559,14 @@ async function handleModels(logStore) {
 
     } catch (error) {
         keyManager.reportFailure(apiKey);
-        await logger.log(logStore, `Exception while fetching model list: ${error.message}`, 'ERROR');
+        const errorMessage = error.name === 'AbortError' 
+            ? 'Request to Google API timed out after 10 seconds.'
+            : `Exception while fetching model list: ${error.message}`;
+        
+        await logger.log(logStore, errorMessage, 'ERROR');
+
         if (error instanceof HttpError) throw error;
-        throw new HttpError(`Exception during model fetch: ${error.message}`, 500);
+        throw new HttpError(errorMessage, 504); // 504 Gateway Timeout
     }
 }
 
