@@ -503,22 +503,57 @@ function createStreamTransformer(inputStream, id, model, streamIncludeUsage) {
 }
 
 async function handleModels(logStore) {
-    await logger.log(logStore, `Returning static model list for compatibility.`);
-    const staticModels = [
-        "gemini-2.5-flash",
-        "gemini-2.5-flash-lite-preview-06-17",
-        "gemini-2.5-pro"
-    ];
-    const openAIResponse = {
-        object: "list",
-        data: staticModels.map(modelId => ({
-            id: modelId,
-            object: "model",
-            created: Math.floor(Date.now() / 1000),
-            owned_by: "google"
-        })),
-    };
-    return new Response(JSON.stringify(openAIResponse), { headers: { 'Content-Type': 'application/json' } });
+    await logger.log(logStore, `Fetching dynamic model list from Google.`);
+    const apiKey = keyManager.getKey();
+    if (!apiKey) {
+        await logger.log(logStore, 'No available API keys to fetch model list.', 'ERROR');
+        throw new HttpError("No available API keys", 500);
+    }
+
+    const keyIdentifier = `...${apiKey.slice(-4)}`;
+    await logger.log(logStore, `Using key ${keyIdentifier} to fetch model list.`);
+
+    try {
+        const url = `${BASE_URL}/${API_VERSION}/models?key=${apiKey}`;
+        const response = await fetch(url, { method: 'GET', headers: { "Content-Type": "application/json" } });
+
+        if (!response.ok) {
+            keyManager.reportFailure(apiKey);
+            const errorBody = await response.text();
+            const errorMessage = `Failed to fetch model list from Google. Status: ${response.status}. Body: ${errorBody}`;
+            await logger.log(logStore, errorMessage, 'ERROR');
+            throw new HttpError(errorMessage, 502);
+        }
+
+        const googleResponse = await response.json();
+
+        if (!googleResponse.models) {
+            const errorMessage = `Google API response for models did not contain a "models" array. Response: ${JSON.stringify(googleResponse)}`;
+            await logger.log(logStore, errorMessage, 'ERROR');
+            throw new HttpError(errorMessage, 500);
+        }
+
+        const openAIResponse = {
+            object: "list",
+            data: googleResponse.models
+                .map(model => ({
+                    id: model.name.replace('models/', ''),
+                    object: "model",
+                    created: Math.floor(Date.now() / 1000),
+                    owned_by: "google",
+                }))
+                .filter(model => model.id.includes('gemini') || model.id.includes('gemma'))
+                .sort((a, b) => a.id.localeCompare(b.id)),
+        };
+
+        return new Response(JSON.stringify(openAIResponse), { headers: { 'Content-Type': 'application/json' } });
+
+    } catch (error) {
+        keyManager.reportFailure(apiKey);
+        await logger.log(logStore, `Exception while fetching model list: ${error.message}`, 'ERROR');
+        if (error instanceof HttpError) throw error;
+        throw new HttpError(`Exception during model fetch: ${error.message}`, 500);
+    }
 }
 
 async function handleDiagLogs(store) {
