@@ -503,18 +503,20 @@ function createStreamTransformer(inputStream, id, model, streamIncludeUsage) {
 }
 
 async function handleModels(logStore) {
-    const apiKey = keyManager.getKey();
-    if (!apiKey) throw new HttpError('No available API keys to fetch models.', 503);
-    await logger.log(logStore, `Fetching models with key ...${apiKey.slice(-4)}`);
-    const response = await fetch(`${BASE_URL}/${API_VERSION}/models`, { headers: makeHeaders(apiKey) });
-    if (!response.ok) {
-        keyManager.reportFailure(apiKey);
-        throw new HttpError(`Failed to fetch models from Google: ${response.status}`, response.status);
-    }
-    const { models } = await response.json();
+    await logger.log(logStore, `Returning static model list for compatibility.`);
+    const staticModels = [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite-preview-06-17",
+        "gemini-2.5-pro"
+    ];
     const openAIResponse = {
         object: "list",
-        data: models.map(({ name }) => ({ id: name.replace("models/", ""), object: "model", created: 0, owned_by: "google" })),
+        data: staticModels.map(modelId => ({
+            id: modelId,
+            object: "model",
+            created: Math.floor(Date.now() / 1000),
+            owned_by: "google"
+        })),
     };
     return new Response(JSON.stringify(openAIResponse), { headers: { 'Content-Type': 'application/json' } });
 }
