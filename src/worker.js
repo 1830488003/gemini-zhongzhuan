@@ -389,6 +389,35 @@ const processCompletionsResponse = (data, model, id) => {
 const delimiter = "\n\n";
 const sseline = (obj) => `data: ${JSON.stringify(obj)}${delimiter}`;
 
+/**
+ * Creates a TransformStream that injects a keep-alive comment every 20 seconds
+ * if no other data is flowing through, to prevent idle timeouts.
+ * @param {number} interval - The interval in milliseconds to send a keep-alive signal.
+ */
+function createHeartbeatStream(interval = 20000) {
+    let timerId;
+    return new TransformStream({
+        start(controller) {
+            timerId = setInterval(() => {
+                controller.enqueue(': keep-alive\n\n');
+            }, interval);
+        },
+        transform(chunk, controller) {
+            // Pass through the original chunk
+            controller.enqueue(chunk);
+            // Reset the timer whenever a chunk passes through.
+            clearInterval(timerId);
+            timerId = setInterval(() => {
+                controller.enqueue(': keep-alive\n\n');
+            }, interval);
+        },
+        flush() {
+            clearInterval(timerId);
+        }
+    });
+}
+
+
 function createStreamTransformer(inputStream, id, model, streamIncludeUsage) {
     const responseLineRE = /^data: (.*)(?:\n\n|\r\r|\r\n\r\n)/;
     let buffer = "";
@@ -497,8 +526,15 @@ function createStreamTransformer(inputStream, id, model, streamIncludeUsage) {
         flush: toOpenAiStreamFlush,
     });
 
+    const heartbeat = createHeartbeatStream();
     const textEncoderStream = new TextEncoderStream();
-    inputStream.pipeThrough(parser).pipeThrough(transformer).pipeTo(textEncoderStream.writable);
+    
+    inputStream
+        .pipeThrough(parser)
+        .pipeThrough(transformer)
+        .pipeThrough(heartbeat)
+        .pipeTo(textEncoderStream.writable);
+        
     return textEncoderStream.readable;
 }
 
